@@ -23,14 +23,15 @@ using Stride.Input;
 namespace Stride.Roads.Editor;
 
 /// <summary>
-/// Draws roads in the scene editor. <see cref="ToggleKey"/> turns drawing on and off (Escape turns it off, and so
-/// does selecting something other than a road or one of its points); while it is on, with a road or point selected:
+/// Draws roads in the scene editor, with a road network, a road or a road's point selected. <see cref="ToggleKey"/>
+/// or a toggle button in the viewport toolbar (as an <see cref="IEditorGameToolService"/>) turns drawing on and off;
+/// Escape turns it off. With none of them selected the button is hidden and drawing is off. While it is on:
 /// <list type="bullet">
-/// <item>a click on the ground adds a point: after the selected point, or at the end of the selected road;</item>
-/// <item>a ctrl-click deletes the road's point nearest to where it lands, within <see cref="DeleteReach"/>.</item>
+/// <item>with a road network selected, a click on the ground starts a new road in it, with its first point there;</item>
+/// <item>with a road or point selected, a click adds a point: after the selected point, or at the end of the road;</item>
+/// <item>a ctrl-click deletes the selected road's point nearest to where it lands, within <see cref="DeleteReach"/>.</item>
 /// </list>
-/// The selected road's outline (<see cref="RoadComponentGizmo"/>) turns from yellow to cyan while drawing is on,
-/// and drawing has a toggle button in the viewport toolbar (as an <see cref="IEditorGameToolService"/>).
+/// The selected road's outline (<see cref="RoadComponentGizmo"/>) turns from yellow to cyan while drawing is on.
 /// Points are moved with the editor's own move tool. Every change is one step to undo. The ground is the
 /// scene's ground plane (y = 0), as where Game Studio places new entities.
 /// </summary>
@@ -43,7 +44,10 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     /// <summary>How far from a point, in metres on the ground, a ctrl-click still deletes it.</summary>
     public const float DeleteReach = 2f;
 
-    /// <summary>How many frames in a row with no road or point selected turn drawing off.</summary>
+    /// <summary>
+    /// How many frames in a row with nothing to draw on selected make drawing unavailable: not at once, as selecting
+    /// what was just added clears the selection for a moment.
+    /// </summary>
     private const int UnselectedFramesToStop = 15;
 
     private static readonly Logger Logger = GlobalLogger.GetLogger("Roads");
@@ -55,7 +59,8 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     private bool pressed;
     private bool releaseNextFrame;
     private Vector2 moved;
-    private int unselectedFrames;
+    private int unselectedFrames = UnselectedFramesToStop + 1;
+    private volatile bool available;
     private readonly EditorTool drawTool;
 
     /// <summary>Drawing turned on (1) or off (0) by the toolbar button, on the UI thread, for the next frame; -1 for neither.</summary>
@@ -65,8 +70,8 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     {
         this.editor = editor ?? throw new ArgumentNullException(nameof(editor));
         this.controller = controller ?? throw new ArgumentNullException(nameof(controller));
-        drawTool = new EditorTool("Stride.Roads.Draw", $"Draw roads ({ToggleKey})", RoadsEditorPlugin.LoadResource("RoadsGizmo.png"),
-            () => IsDrawing, active => Interlocked.Exchange(ref requested, active ? 1 : 0));
+        drawTool = new EditorTool("Stride.Roads.Draw", $"Draw roads ({ToggleKey})", RoadsEditorPlugin.LoadResource("DrawRoad.png"),
+            () => IsDrawing, active => Interlocked.Exchange(ref requested, active ? 1 : 0), () => available);
         Tools = [drawTool];
     }
 
@@ -104,7 +109,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
                 IsDrawing = false;
                 IsControllingMouse = false;
                 releaseNextFrame = false;
-                drawTool.RaiseActiveChanged();
+                drawTool.RaiseChanged();
             }
         }
     }
@@ -119,9 +124,18 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
             IsControllingMouse = false;
         }
 
-        if (!IsActive)
+        // Drawing is there to use only with something to draw on selected: else its button hides, and it turns off.
+        unselectedFrames = IsActive && SelectedTarget() != null ? 0 : unselectedFrames + 1;
+        var nowAvailable = unselectedFrames <= UnselectedFramesToStop;
+        if (nowAvailable != available)
         {
-            if (IsDrawing)
+            available = nowAvailable;
+            drawTool.RaiseChanged();
+        }
+        if (!available || !IsActive)
+        {
+            Interlocked.Exchange(ref requested, -1);
+            if (IsDrawing && !pressed)
                 SetDrawing(false);
             return;
         }
@@ -137,15 +151,6 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
             SetDrawing(false);
         if (!IsDrawing)
             return;
-
-        // Nothing to draw on once no road or point is selected: drawing turns off. Not at once, as selecting
-        // a point just added clears the selection for a moment.
-        unselectedFrames = SelectedRoad() == null ? unselectedFrames + 1 : 0;
-        if (unselectedFrames > UnselectedFramesToStop && !pressed)
-        {
-            SetDrawing(false);
-            return;
-        }
 
         var screenSize = new Vector2(game.GraphicsDevice.Presenter.BackBuffer.Width, game.GraphicsDevice.Presenter.BackBuffer.Height);
         if (input.IsMouseButtonPressed(MouseButton.Left) && IsMouseAvailable && !input.IsMouseButtonDown(MouseButton.Right))
@@ -174,20 +179,34 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         IsDrawing = drawing;
         // The toolbar button follows, however it was turned (key, deselecting, the button itself).
         if (changed)
-            drawTool.RaiseActiveChanged();
+            drawTool.RaiseChanged();
         pressed = false;
-        unselectedFrames = 0;
         if (!drawing && IsControllingMouse)
             releaseNextFrame = true;
     }
 
-    /// <summary>Adds a point where the mouse is, or with ctrl held, deletes the road's nearest point.</summary>
+    /// <summary>
+    /// Adds a point where the mouse is, or with ctrl held, deletes the road's nearest point; with a road network selected,
+    /// starts a new road there.
+    /// </summary>
     private void Click(bool delete, Vector2 mouse)
     {
-        if (SelectedRoad() is not var (road, roadId, selectedPoint))
+        if (SelectedTarget() is not { } target)
             return;
 
         var world = game!.GetPositionInScene(mouse);
+        if (target.Network is { } network)
+        {
+            if (!delete)
+            {
+                var inNetwork = Vector3.TransformCoordinate(world, Matrix.Invert(network.Entity.Transform.WorldMatrix));
+                var roadCount = network.Entity.Transform.Children.Count;
+                editor.Dispatcher.InvokeAsync(() => AddRoad(target.Id, inNetwork, roadCount));
+            }
+            return;
+        }
+
+        var (road, roadId, selectedPoint) = (target.Road!, target.Id, target.Point);
         var toRoad = Matrix.Invert(road.Entity.Transform.WorldMatrix);
         var local = Vector3.TransformCoordinate(world, toRoad);
         var points = RoadProcessor.Points(road);
@@ -212,25 +231,34 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     }
 
     /// <summary>
-    /// The road being drawn, from the editor's selection: a selected road, or the road a selected point is on
-    /// (then that point too). The first that is one, if several are selected.
+    /// What drawing works on: a road (and the selected point of it, if a point is selected), or a road network to start
+    /// roads in. <see cref="Id"/> is the road's, or the network's.
     /// </summary>
-    private (RoadComponent Road, AbsoluteId RoadId, Entity? Point)? SelectedRoad()
+    private readonly record struct Target(AbsoluteId Id, RoadComponent? Road, Entity? Point, RoadNetworkComponent? Network);
+
+    /// <summary>
+    /// What drawing works on, from the editor's selection: a selected road, the road a selected point is on, or else
+    /// a selected road network. Roads come first, if several things are selected.
+    /// </summary>
+    private Target? SelectedTarget()
     {
         selection ??= game!.EditorServices.Get<IEditorGameEntitySelectionService>();
         if (selection == null)
             return null;
+        Target? network = null;
         foreach (var id in selection.GetSelectedIds().ToList())
         {
             if (FindEntity(id) is not { } entity)
                 continue;
             if (entity.Get<RoadComponent>() is { } road)
-                return (road, id, null);
+                return new Target(id, road, null, null);
             var parent = entity.GetParent();
             if (parent?.Get<RoadComponent>() is { } owner)
-                return (owner, new AbsoluteId(id.AssetId, parent.Id), entity);
+                return new Target(new AbsoluteId(id.AssetId, parent.Id), owner, entity, null);
+            if (network == null && entity.Get<RoadNetworkComponent>() is { } roads)
+                network = new Target(id, null, null, roads);
         }
-        return null;
+        return network;
     }
 
     /// <summary>The game-side entity of a part, or null if it is gone (the selection can name one an undo just removed).</summary>
@@ -266,6 +294,39 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
 
         // Select it, so the next click carries on after it.
         if (editor.FindPartViewModel(new AbsoluteId(roadId.AssetId, point.Id)) is { } added)
+        {
+            editor.ClearSelection();
+            editor.SelectedContent.Add(added);
+        }
+    }
+
+    /// <summary>
+    /// Starts a new road in the network, at this place in its space and this place among its children, with its first
+    /// point there; selects that point, so the next click carries the road on. One step to undo.
+    /// </summary>
+    private void AddRoad(AbsoluteId networkId, Vector3 local, int index)
+    {
+        if (editor.FindPartViewModel(networkId) is not EntityViewModel network)
+            return;
+
+        var road = new Entity($"Road {index + 1}") { new RoadComponent() };
+        road.Transform.Position = local;
+        var point = new Entity("Point 1");
+        AssetCollectionItemIdHelper.GenerateMissingItemIds(road);
+        AssetCollectionItemIdHelper.GenerateMissingItemIds(point);
+        var roads = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(road, "") };
+        var points = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(point, "") };
+        index = Math.Clamp(index, 0, network.AssetSideEntity.Transform.Children.Count);
+
+        using (var transaction = editor.UndoRedoService.CreateTransaction())
+        {
+            var graph = network.Asset.AssetHierarchyPropertyGraph;
+            graph.AddPartToAsset(roads, roads.Single().Value, network.AssetSideEntity, index);
+            graph.AddPartToAsset(points, points.Single().Value, road, 0);
+            editor.UndoRedoService.SetName(transaction, $"Add road '{road.Name}'");
+        }
+
+        if (editor.FindPartViewModel(new AbsoluteId(networkId.AssetId, point.Id)) is { } added)
         {
             editor.ClearSelection();
             editor.SelectedContent.Add(added);
