@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Stride.Core.Mathematics;
 using Stride.Engine;
+using Stride.Engine.Design;
 using Stride.Games;
 using Stride.Graphics;
 using Stride.Rendering;
@@ -15,8 +16,10 @@ namespace Stride.Roads;
 /// <summary>
 /// Builds each <see cref="RoadComponent"/>'s model from its points whenever they or its settings
 /// change. It runs in Game Studio's scene editor as well as the game (the component asks for both
-/// execution modes), so a road reshapes as its points are dragged. What it builds sits on a child
-/// entity of its own, made here and never saved.
+/// execution modes), so a road reshapes as its points are dragged. What it builds sits on an entity
+/// of its own, made here and never saved: at the root of the scene instance (not under the road, whose
+/// children the editor keeps in step with the scene asset), following the road's place and marked as
+/// standing for it (<see cref="GeneratedEntity.OwnerKey"/>), so clicking it in the editor selects the road.
 /// </summary>
 public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor.Built>
 {
@@ -41,7 +44,7 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
     protected override void OnEntityComponentRemoved(Entity entity, RoadComponent component, Built data)
     {
         if (data.Holder != null)
-            entity.RemoveChild(data.Holder);
+            data.Holder.Scene = null;
         Release(data.Model);
         component.Frames = Array.Empty<RoadFrame>();
     }
@@ -50,6 +53,13 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
     {
         foreach (var (component, data) in ComponentDatas)
         {
+            // Where the road is, every frame: what it builds isn't its child, so doesn't move with it.
+            if (data.Holder != null)
+            {
+                data.Holder.Transform.UseTRS = false;
+                data.Holder.Transform.LocalMatrix = component.Entity.Transform.WorldMatrix;
+            }
+
             var state = State(component);
             if (state == data.State)
                 continue;
@@ -58,9 +68,9 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         }
     }
 
-    /// <summary>The points a road runs through, in order: its entity's children but what it builds.</summary>
+    /// <summary>The points a road runs through, in order: its entity's children.</summary>
     public static List<Entity> Points(RoadComponent road) =>
-        road.Entity.Transform.Children.Select(t => t.Entity).Where(e => e.Name != BuiltName).ToList();
+        road.Entity.Transform.Children.Select(t => t.Entity).ToList();
 
     /// <summary>Everything a road is built from, hashed: its points' places and settings, and its own.</summary>
     private static int State(RoadComponent road)
@@ -91,7 +101,8 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
     {
         var points = Points(road);
         var device = _graphics?.GraphicsDevice;
-        if (points.Count < 2 || road.Section.Lanes == 0 || device == null)
+        var root = (EntityManager as SceneInstance)?.RootScene;
+        if (points.Count < 2 || road.Section.Lanes == 0 || device == null || root == null)
         {
             road.Frames = Array.Empty<RoadFrame>();
             if (data.Holder != null)
@@ -121,7 +132,10 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         if (data.Holder == null)
         {
             data.Holder = new Entity(BuiltName) { new ModelComponent() };
-            road.Entity.AddChild(data.Holder);
+            data.Holder.Tags.Set(GeneratedEntity.OwnerKey, road.Entity);
+            data.Holder.Transform.UseTRS = false;
+            data.Holder.Transform.LocalMatrix = road.Entity.Transform.WorldMatrix;
+            root.Entities.Add(data.Holder);
         }
         data.Holder.Get<ModelComponent>()!.Model = model;
         data.Holder.EnableAll(true, true);
