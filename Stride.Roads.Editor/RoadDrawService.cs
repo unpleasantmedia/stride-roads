@@ -32,8 +32,8 @@ namespace Stride.Roads.Editor;
 /// <item>a ctrl-click deletes the selected road's point nearest to where it lands, within <see cref="DeleteReach"/>.</item>
 /// </list>
 /// The selected road's outline (<see cref="RoadComponentGizmo"/>) turns from yellow to cyan while drawing is on.
-/// Points are moved with the editor's own move tool. Every change is one step to undo. The ground is the
-/// scene's ground plane (y = 0), as where Game Studio places new entities.
+/// Points are moved with the editor's own move tool. Every change is one step to undo. A click lands on the model
+/// under the mouse (<see cref="SurfacePicker"/>), else on the scene's ground plane (y = 0).
 /// </summary>
 [EditorGameService(typeof(EntityHierarchyEditorController))]
 public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToolService
@@ -56,6 +56,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     private readonly IEditorGameController controller;
     private EntityHierarchyEditorGame? game;
     private IEditorGameEntitySelectionService? selection;
+    private SurfacePicker? surface;
     private bool pressed;
     private bool releaseNextFrame;
     private Vector2 moved;
@@ -194,7 +195,8 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         if (SelectedTarget() is not { } target)
             return;
 
-        var world = game!.GetPositionInScene(mouse);
+        surface ??= new SurfacePicker(game!, selection!, game!.EditorServices.Get<IEditorGameCameraService>());
+        var world = surface.PointAt(mouse);
         if (target.Network is { } network)
         {
             if (!delete)
