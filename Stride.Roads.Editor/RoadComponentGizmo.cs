@@ -28,9 +28,15 @@ public class RoadComponentGizmo : BillboardingGizmo<RoadComponent>
 
     private static readonly Color LineColor = new(1f, 0.85f, 0.2f, 1f);
 
+    /// <summary>The outline's colour while <see cref="RoadDrawService"/> is drawing.</summary>
+    private static readonly Color DrawingColor = new(0.2f, 0.9f, 1f, 1f);
+
     private Entity? outline;
     private Mesh? mesh;
+    private Material? material;
     private IEditorGameEntitySelectionService? selection;
+    private RoadDrawService? drawing;
+    private bool? drawnAsDrawing;
     private int? builtState;
 
     public RoadComponentGizmo(EntityComponent component)
@@ -42,13 +48,14 @@ public class RoadComponentGizmo : BillboardingGizmo<RoadComponent>
     {
         var root = base.Create();
         mesh = new Mesh { Draw = new MeshDraw { PrimitiveType = PrimitiveType.LineList } };
+        material = GizmoEmissiveColorMaterial.Create(GraphicsDevice, LineColor);
         // A child of the root, which sits where the road's entity is and turns with it (only the billboard is
         // scaled), so the outline is drawn in the road's own space, as its frames and points are.
         outline = new Entity("Road outline")
         {
             new ModelComponent
             {
-                Model = new Model { GizmoEmissiveColorMaterial.Create(GraphicsDevice, LineColor), mesh },
+                Model = new Model { material, mesh },
                 RenderGroup = RenderGroup,
             },
         };
@@ -62,9 +69,17 @@ public class RoadComponentGizmo : BillboardingGizmo<RoadComponent>
             return;
 
         selection ??= Game.EditorServices.Get<IEditorGameEntitySelectionService>();
+        drawing ??= Game.EditorServices.Get<RoadDrawService>();
         var selected = IsRoadSelected();
         if (selected)
             Rebuild();
+
+        var isDrawing = drawing?.IsDrawing == true;
+        if (isDrawing != drawnAsDrawing && material != null)
+        {
+            GizmoEmissiveColorMaterial.UpdateColor(GraphicsDevice, material, isDrawing ? DrawingColor : LineColor);
+            drawnAsDrawing = isDrawing;
+        }
         // Shown only with something to draw: an outline with no buffers is never handed to the renderer.
         var shown = selected && mesh?.Draw.VertexBuffers != null;
         if (shown && outline.Transform.Parent == null)
