@@ -74,6 +74,11 @@ public sealed class RoadComponent : EntityComponent
     [DataMember(100), Display(category: "Shape"), DefaultValue(false)]
     public bool Closed { get; set; }
 
+    /// <summary>Whether the road has collision in the game: its asphalt, banks and sidewalks, as a static mesh.</summary>
+    [DataMember(110), Display(category: "Shape"), DefaultValue(true)]
+    public bool Collision { get; set; } = true;
+
+    // A material left empty draws with RoadMaterials' plain colour for it.
     [DataMember(200), Display(category: "Materials")]
     public Material? SurfaceMaterial { get; set; }
 

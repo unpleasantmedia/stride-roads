@@ -21,6 +21,8 @@
     <ProjectReference Include="..\..\..\engine\Stride.Engine\Stride.Engine.csproj" />
     <ProjectReference Include="..\..\..\engine\Stride.Games\Stride.Games.csproj" />
     <ProjectReference Include="..\..\..\engine\Stride.Rendering\Stride.Rendering.csproj" />
+    <!-- Road collision is a Bullet static mesh collider -->
+    <ProjectReference Include="..\..\BulletPhysics\Stride.Physics\Stride.Physics.csproj" />
   </ItemGroup>
   <Import Project="$(StrideRoot)sources/sdk/Stride.Build.Sdk/Sdk/Sdk.targets" />
 </Project>

@@ -7,6 +7,7 @@ using Stride.Engine.Design;
 using Stride.Games;
 using Stride.Graphics;
 using Stride.Rendering;
+using Stride.Physics;
 using Stride.Rendering.Materials;
 using Buffer = Stride.Graphics.Buffer;
 using NVector3 = System.Numerics.Vector3;
@@ -79,6 +80,7 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         hash.Add(road.Section);
         hash.Add(road.Closed);
         hash.Add(road.SidewalkFalloff);
+        hash.Add(road.Collision);
         hash.Add(road.SurfaceMaterial);
         hash.Add(road.WhiteLineMaterial);
         hash.Add(road.YellowLineMaterial);
@@ -115,7 +117,15 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         var meshes = RoadMeshBuilder.Build(road.Frames, road.Section, curve.Closed, road.SidewalkFalloff);
 
         var parts = new[] { meshes.Surface, meshes.WhiteLines, meshes.YellowLines, meshes.Banks, meshes.Sidewalks };
-        var materials = new[] { road.SurfaceMaterial, road.WhiteLineMaterial, road.YellowLineMaterial, road.BankMaterial, road.SidewalkMaterial };
+        // Where it has no material of its own, a plain colour (RoadMaterials).
+        var materials = new[]
+        {
+            road.SurfaceMaterial ?? RoadMaterials.DefaultAsphalt(device),
+            road.WhiteLineMaterial ?? RoadMaterials.DefaultWhiteLine(device),
+            road.YellowLineMaterial ?? RoadMaterials.DefaultYellowLine(device),
+            road.BankMaterial ?? RoadMaterials.DefaultBank(device),
+            road.SidewalkMaterial ?? RoadMaterials.DefaultSidewalk(device),
+        };
         var model = new Model();
         var bounds = BoundingBox.Empty;
         foreach (var index in Enumerable.Range(0, parts.Length).Where(i => !parts[i].IsEmpty))
@@ -138,9 +148,38 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
             root.Entities.Add(data.Holder);
         }
         data.Holder.Get<ModelComponent>()!.Model = model;
+        UpdateCollision(road, data.Holder, meshes);
         data.Holder.EnableAll(true, true);
         Release(data.Model);
         data.Model = model;
+    }
+
+    /// <summary>
+    /// Gives what a road builds a static collider of its asphalt, banks and sidewalks (the lines lie on the asphalt), made
+    /// again with its shape; none if the road has no collision. In the game only: the editor never steps physics.
+    /// </summary>
+    private void UpdateCollision(RoadComponent road, Entity holder, RoadMeshes meshes)
+    {
+        if (holder.Get<StaticColliderComponent>() is { } previous)
+        {
+            var shape = previous.ColliderShape;
+            holder.Remove(previous);
+            shape?.Dispose();
+        }
+        if (!road.Collision || (EntityManager.ExecutionMode & ExecutionMode.Runtime) == 0)
+            return;
+
+        var vertices = new List<Vector3>();
+        var indices = new List<int>();
+        foreach (var part in new[] { meshes.Surface, meshes.Banks, meshes.Sidewalks })
+        {
+            var start = vertices.Count;
+            vertices.AddRange(part.Vertices.Select(v => new Vector3(v.X, v.Y, v.Z)));
+            indices.AddRange(part.Indices.Select(i => i + start));
+        }
+        if (indices.Count == 0)
+            return;
+        holder.Add(new StaticColliderComponent { ColliderShape = new StaticMeshColliderShape(vertices, indices) });
     }
 
     /// <summary>A point as the road's maths takes it, in metres in its road's space.</summary>
