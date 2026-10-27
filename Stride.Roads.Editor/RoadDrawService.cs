@@ -12,6 +12,7 @@ using Stride.Core;
 using Stride.Core.Assets;
 using Stride.Core.Assets.Editor.ViewModel;
 using Stride.Core.BuildEngine;
+using Stride.Core.Diagnostics;
 using Stride.Core.Mathematics;
 using Stride.Editor.EditorGame.Game;
 using Stride.Engine;
@@ -20,8 +21,8 @@ using Stride.Input;
 namespace Stride.Roads.Editor;
 
 /// <summary>
-/// Draws roads in the scene editor. <see cref="ToggleKey"/> turns drawing on and off (Escape turns it off);
-/// while it is on, with a road or one of its points selected:
+/// Draws roads in the scene editor. <see cref="ToggleKey"/> turns drawing on and off (Escape turns it off, and so
+/// does selecting something other than a road or one of its points); while it is on, with a road or point selected:
 /// <list type="bullet">
 /// <item>a click on the ground adds a point: after the selected point, or at the end of the selected road;</item>
 /// <item>a ctrl-click deletes the road's point nearest to where it lands, within <see cref="DeleteReach"/>.</item>
@@ -39,6 +40,11 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
     /// <summary>How far from a point, in metres on the ground, a ctrl-click still deletes it.</summary>
     public const float DeleteReach = 2f;
 
+    /// <summary>How many frames in a row with no road or point selected turn drawing off.</summary>
+    private const int UnselectedFramesToStop = 15;
+
+    private static readonly Logger Logger = GlobalLogger.GetLogger("Roads");
+
     private readonly EntityHierarchyEditorViewModel editor;
     private readonly IEditorGameController controller;
     private EntityHierarchyEditorGame? game;
@@ -46,6 +52,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
     private bool pressed;
     private bool releaseNextFrame;
     private Vector2 moved;
+    private int unselectedFrames;
 
     public RoadDrawService(EntityHierarchyEditorViewModel editor, IEditorGameController controller)
     {
@@ -72,44 +79,75 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
         while (game!.IsRunning)
         {
             await game.Script.NextFrame();
-            if (!IsActive)
-                continue;
-
-            // Let go of the mouse a frame after the click, so the selection service, which acts on the same
-            // release, has seen it taken and left the selection alone.
-            if (releaseNextFrame)
+            // One frame failing (an entity gone after an undo, say) must not end the loop: drawing would stay on
+            // with no key read, and the mouse could stay held from every other service.
+            try
             {
-                releaseNextFrame = false;
-                IsControllingMouse = false;
+                Step();
             }
-
-            var input = game.Input;
-            if (input.IsKeyPressed(ToggleKey))
-                SetDrawing(!IsDrawing);
-            else if (IsDrawing && input.IsKeyPressed(Keys.Escape))
-                SetDrawing(false);
-            if (!IsDrawing)
-                continue;
-
-            var screenSize = new Vector2(game.GraphicsDevice.Presenter.BackBuffer.Width, game.GraphicsDevice.Presenter.BackBuffer.Height);
-            if (input.IsMouseButtonPressed(MouseButton.Left) && IsMouseAvailable && !input.IsMouseButtonDown(MouseButton.Right))
+            catch (Exception e)
             {
-                pressed = true;
-                moved = Vector2.Zero;
-                IsControllingMouse = true;
-            }
-            if (!pressed)
-                continue;
-
-            moved += new Vector2(Math.Abs(input.MouseDelta.X * screenSize.X), Math.Abs(input.MouseDelta.Y * screenSize.Y));
-            if (input.IsMouseButtonReleased(MouseButton.Left))
-            {
+                Logger.Error("Road drawing failed; drawing is off.", e);
                 pressed = false;
-                releaseNextFrame = true;
-                // A drag (orbiting the camera, or a slip of the hand) adds nothing.
-                if (moved.Length() < TransformationGizmo.TransformationStartPixelThreshold)
-                    Click(input.IsKeyDown(Keys.LeftCtrl) || input.IsKeyDown(Keys.RightCtrl), input.MousePosition);
+                IsDrawing = false;
+                IsControllingMouse = false;
+                releaseNextFrame = false;
             }
+        }
+    }
+
+    private void Step()
+    {
+        // Let go of the mouse a frame after the click, so the selection service, which acts on the same
+        // release, has seen it taken and left the selection alone.
+        if (releaseNextFrame)
+        {
+            releaseNextFrame = false;
+            IsControllingMouse = false;
+        }
+
+        if (!IsActive)
+        {
+            if (IsDrawing)
+                SetDrawing(false);
+            return;
+        }
+
+        var input = game!.Input;
+        if (input.IsKeyPressed(ToggleKey))
+            SetDrawing(!IsDrawing);
+        else if (IsDrawing && input.IsKeyPressed(Keys.Escape))
+            SetDrawing(false);
+        if (!IsDrawing)
+            return;
+
+        // Nothing to draw on once no road or point is selected: drawing turns off. Not at once, as selecting
+        // a point just added clears the selection for a moment.
+        unselectedFrames = SelectedRoad() == null ? unselectedFrames + 1 : 0;
+        if (unselectedFrames > UnselectedFramesToStop && !pressed)
+        {
+            SetDrawing(false);
+            return;
+        }
+
+        var screenSize = new Vector2(game.GraphicsDevice.Presenter.BackBuffer.Width, game.GraphicsDevice.Presenter.BackBuffer.Height);
+        if (input.IsMouseButtonPressed(MouseButton.Left) && IsMouseAvailable && !input.IsMouseButtonDown(MouseButton.Right))
+        {
+            pressed = true;
+            moved = Vector2.Zero;
+            IsControllingMouse = true;
+        }
+        if (!pressed)
+            return;
+
+        moved += new Vector2(Math.Abs(input.MouseDelta.X * screenSize.X), Math.Abs(input.MouseDelta.Y * screenSize.Y));
+        if (input.IsMouseButtonReleased(MouseButton.Left))
+        {
+            pressed = false;
+            releaseNextFrame = true;
+            // A drag (orbiting the camera, or a slip of the hand) adds nothing.
+            if (moved.Length() < TransformationGizmo.TransformationStartPixelThreshold)
+                Click(input.IsKeyDown(Keys.LeftCtrl) || input.IsKeyDown(Keys.RightCtrl), input.MousePosition);
         }
     }
 
@@ -117,6 +155,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
     {
         IsDrawing = drawing;
         pressed = false;
+        unselectedFrames = 0;
         if (!drawing && IsControllingMouse)
             releaseNextFrame = true;
     }
@@ -160,9 +199,9 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
         selection ??= game!.EditorServices.Get<IEditorGameEntitySelectionService>();
         if (selection == null)
             return null;
-        foreach (var id in selection.GetSelectedIds())
+        foreach (var id in selection.GetSelectedIds().ToList())
         {
-            if (controller.FindGameSidePart(id) is not Entity entity)
+            if (FindEntity(id) is not { } entity)
                 continue;
             if (entity.Get<RoadComponent>() is { } road)
                 return (road, id, null);
@@ -171,6 +210,19 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
                 return (owner, new AbsoluteId(id.AssetId, parent.Id), entity);
         }
         return null;
+    }
+
+    /// <summary>The game-side entity of a part, or null if it is gone (the selection can name one an undo just removed).</summary>
+    private Entity? FindEntity(AbsoluteId id)
+    {
+        try
+        {
+            return controller.FindGameSidePart(id) as Entity;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     /// <summary>Adds a point to the road, at this place in its space and this place among its points, and selects it.</summary>
