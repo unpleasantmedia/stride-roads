@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Stride.Assets.Entities;
 using Stride.Assets.Presentation.AssetEditors.EntityHierarchyEditor.Game;
@@ -27,12 +29,13 @@ namespace Stride.Roads.Editor;
 /// <item>a click on the ground adds a point: after the selected point, or at the end of the selected road;</item>
 /// <item>a ctrl-click deletes the road's point nearest to where it lands, within <see cref="DeleteReach"/>.</item>
 /// </list>
-/// The selected road's outline (<see cref="RoadComponentGizmo"/>) turns from yellow to cyan while drawing is on.
+/// The selected road's outline (<see cref="RoadComponentGizmo"/>) turns from yellow to cyan while drawing is on,
+/// and drawing has a toggle button in the viewport toolbar (as an <see cref="IEditorGameToolService"/>).
 /// Points are moved with the editor's own move tool. Every change is one step to undo. The ground is the
 /// scene's ground plane (y = 0), as where Game Studio places new entities.
 /// </summary>
 [EditorGameService(typeof(EntityHierarchyEditorController))]
-public sealed class RoadDrawService : EditorGameMouseServiceBase
+public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToolService
 {
     /// <summary>The key that turns drawing on and off: the scene editor's own keys leave B free.</summary>
     public const Keys ToggleKey = Keys.B;
@@ -53,15 +56,24 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
     private bool releaseNextFrame;
     private Vector2 moved;
     private int unselectedFrames;
+    private readonly EditorTool drawTool;
+
+    /// <summary>Drawing turned on (1) or off (0) by the toolbar button, on the UI thread, for the next frame; -1 for neither.</summary>
+    private int requested = -1;
 
     public RoadDrawService(EntityHierarchyEditorViewModel editor, IEditorGameController controller)
     {
         this.editor = editor ?? throw new ArgumentNullException(nameof(editor));
         this.controller = controller ?? throw new ArgumentNullException(nameof(controller));
+        drawTool = new EditorTool("Stride.Roads.Draw", $"Draw roads ({ToggleKey})", RoadsEditorPlugin.LoadResource("RoadsGizmo.png"),
+            () => IsDrawing, active => Interlocked.Exchange(ref requested, active ? 1 : 0));
+        Tools = [drawTool];
     }
 
     /// <summary>Whether drawing is on.</summary>
     public bool IsDrawing { get; private set; }
+
+    public IReadOnlyList<EditorTool> Tools { get; }
 
     public override bool IsControllingMouse { get; protected set; }
 
@@ -92,6 +104,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
                 IsDrawing = false;
                 IsControllingMouse = false;
                 releaseNextFrame = false;
+                drawTool.RaiseActiveChanged();
             }
         }
     }
@@ -112,6 +125,10 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
                 SetDrawing(false);
             return;
         }
+
+        var fromButton = Interlocked.Exchange(ref requested, -1);
+        if (fromButton >= 0)
+            SetDrawing(fromButton == 1);
 
         var input = game!.Input;
         if (input.IsKeyPressed(ToggleKey))
@@ -153,7 +170,11 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase
 
     private void SetDrawing(bool drawing)
     {
+        var changed = IsDrawing != drawing;
         IsDrawing = drawing;
+        // The toolbar button follows, however it was turned (key, deselecting, the button itself).
+        if (changed)
+            drawTool.RaiseActiveChanged();
         pressed = false;
         unselectedFrames = 0;
         if (!drawing && IsControllingMouse)
