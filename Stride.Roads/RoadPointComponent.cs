@@ -8,14 +8,15 @@ namespace Stride.Roads;
 
 /// <summary>
 /// How a road runs through one of its points: put on a child entity of a <see cref="RoadComponent"/>'s entity.
-/// A point without one runs on smoothly towards its neighbours, with an even curve.
+/// A point left unrotated runs on smoothly towards its neighbours, with an even curve; rotating it turns the road
+/// from there, in the frame its gizmo shows in local space (about Y bends it, about X pitches it, about Z banks it).
 /// </summary>
 [DataContract("RoadPointComponent")]
 [Display("Road point")]
 [ComponentCategory("Roads")]
 public sealed class RoadPointComponent : EntityComponent
 {
-    /// <summary>Whether the road runs the way this point faces (its forward, -Z), rather than on smoothly through it.</summary>
+    /// <summary>Whether the road runs the way this point faces in the world (its forward, -Z), rather than turned from the way it would run on its own.</summary>
     [DataMember(0), DefaultValue(false)]
     public bool FollowRotation { get; set; }
 

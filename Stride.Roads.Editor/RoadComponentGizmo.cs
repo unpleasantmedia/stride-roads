@@ -15,7 +15,8 @@ namespace Stride.Roads.Editor;
 /// <summary>
 /// A road in the scene editor: a billboard at its entity, so it can be found and picked where it has
 /// no points yet, and while it or one of its points is selected, a line along its middle and a cross at
-/// each of its points, so their places and order show without picking through the scene tree.
+/// each of its points, so their places and order show without picking through the scene tree; and a ring at each of
+/// its ramps' free ends, where drawing can carry a road on from them.
 /// </summary>
 [GizmoComponent(typeof(RoadComponent), true)]
 public class RoadComponentGizmo : BillboardingGizmo<RoadComponent>
@@ -25,6 +26,9 @@ public class RoadComponentGizmo : BillboardingGizmo<RoadComponent>
 
     /// <summary>How high above the road its line and crosses are drawn, in metres, so the surface doesn't hide them.</summary>
     private const float Lift = 0.05f;
+
+    /// <summary>How far a ramp's end ring reaches out, in metres.</summary>
+    private const float RingSize = 2f;
 
     private static readonly Color LineColor = new(1f, 0.85f, 0.2f, 1f);
 
@@ -119,6 +123,11 @@ public class RoadComponentGizmo : BillboardingGizmo<RoadComponent>
             hash.Add(frame.Position);
         foreach (var point in points)
             hash.Add(point);
+        var ramps = Component.Entity.GetAll<RoadRampComponent>().ToList();
+        foreach (var ramp in ramps)
+            hash.Add(ramp.Spec);
+        var fork = Component.Entity.Get<RoadForkComponent>();
+        hash.Add(fork?.Spec);
         var state = hash.ToHashCode();
         if (state == builtState)
             return;
@@ -144,6 +153,24 @@ public class RoadComponentGizmo : BillboardingGizmo<RoadComponent>
             lines.Add(at + Vector3.UnitZ * CrossSize);
             lines.Add(at);
             lines.Add(at + Vector3.UnitY * CrossSize * 2f);
+        }
+
+        if (frames.Count >= 2)
+        {
+            var ends = ramps.Select(ramp => RoadRampShaper.FreeEnd(frames, ramp.Spec, Component.Section).Position).ToList();
+            if (fork != null && RoadProcessor.ForkShape(fork) is { } shape)
+                ends.AddRange(new[] { true, false }.Select(left => shape.BranchEnd(frames, left).Position));
+            foreach (var end in ends)
+            {
+                var centre = ToStride(end);
+                const int segments = 24;
+                for (var i = 0; i < segments; i++)
+                {
+                    var (a, b) = (i * MathF.Tau / segments, (i + 1) * MathF.Tau / segments);
+                    lines.Add(centre + new Vector3(MathF.Cos(a), 0f, MathF.Sin(a)) * RingSize);
+                    lines.Add(centre + new Vector3(MathF.Cos(b), 0f, MathF.Sin(b)) * RingSize);
+                }
+            }
         }
 
         Release();

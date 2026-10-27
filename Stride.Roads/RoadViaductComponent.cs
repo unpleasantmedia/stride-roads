@@ -15,6 +15,7 @@ namespace Stride.Roads;
 [DataContract("RoadViaductComponent")]
 [Display("Road viaduct")]
 [ComponentCategory("Roads")]
+[AllowMultipleComponents]
 public sealed class RoadViaductComponent : EntityComponent
 {
     /// <summary>How thick its deck is under the road, in metres.</summary>

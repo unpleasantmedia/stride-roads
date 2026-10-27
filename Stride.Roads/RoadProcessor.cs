@@ -89,6 +89,38 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         hash.Add(road.StructureMaterial);
         foreach (var viaduct in road.Entity.GetAll<RoadViaductComponent>())
             hash.Add(viaduct.Over(0f, 0f));
+        foreach (var ramp in road.Entity.GetAll<RoadRampComponent>())
+            hash.Add(ramp.Spec);
+        hash.Add(road.Entity.Get<RoadForkComponent>()?.Spec);
+        // The ramps and roads its ends are held to, as last built.
+        foreach (var ramp in new[] { road.FromRamp, road.ToRamp })
+        {
+            if (ramp?.Entity?.Get<RoadComponent>() is not { } owner)
+                continue;
+            hash.Add(ramp.Spec);
+            hash.Add(owner.Frames);
+            hash.Add(owner.Entity.Transform.WorldMatrix);
+        }
+        foreach (var fork in new[] { road.FromFork, road.ToFork })
+        {
+            if (fork?.Entity?.Get<RoadComponent>() is not { } owner)
+                continue;
+            hash.Add(fork.Spec);
+            hash.Add(owner.Section);
+            hash.Add(owner.Frames);
+            hash.Add(owner.Entity.Transform.WorldMatrix);
+        }
+        hash.Add(road.FromForksLeft);
+        hash.Add(road.ToForksLeft);
+        foreach (var other in new[] { road.FromRoad, road.ToRoad })
+        {
+            if (other?.Entity == null)
+                continue;
+            hash.Add(other.Frames);
+            hash.Add(other.Entity.Transform.WorldMatrix);
+        }
+        hash.Add(road.FromRoadsEnd);
+        hash.Add(road.ToRoadsEnd);
         // Where it is in the world, for how far its viaducts' pillars reach down.
         hash.Add(road.Entity.Transform.WorldMatrix);
         foreach (var point in Points(road))
@@ -141,10 +173,29 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
             return;
         }
 
-        var curve = new RoadCurve(points.Select(ToCurvePoint).ToList(), road.Closed);
+        var curvePoints = points.Select(ToCurvePoint).ToList();
+        // Its ends held where they are joined, running on the way what they join does; their points shown there too.
+        foreach (var atStart in new[] { true, false })
+        {
+            if (points.Count < 2 && !atStart || JoinOf(road, atStart) is not { } pin)
+                continue;
+            var i = atStart ? 0 : points.Count - 1;
+            curvePoints[i] = curvePoints[i] with { Position = ToNumerics(pin.Position), Tangent = ToNumerics(pin.Way), Turn = null, Bank = 0f };
+            points[i].Transform.Position = pin.Position;
+            points[i].Transform.Rotation = Quaternion.Identity;
+        }
+        var curve = new RoadCurve(curvePoints, road.Closed);
+        // What each point's rotation is relative to, for its gizmo: the way the road would run through it on its own.
+        for (var i = 0; i < points.Count; i++)
+        {
+            var frame = points[i].Get<RoadPointComponent>() is { FollowRotation: true } ? Quaternion.Identity : Facing(curve.NaturalTangentAt(i));
+            points[i].Tags.Set(GizmoFrame.BaseRotationKey, frame);
+        }
         road.Frames = curve.Frames(RoadComponent.Spacing, out var pointsAt);
         var structures = Structures(road, points, pointsAt);
-        var meshes = RoadMeshBuilder.Build(road.Frames, road.Section, curve.Closed, road.SidewalkFalloff, structures);
+        var ramps = road.Entity.GetAll<RoadRampComponent>().Select(r => r.Spec).ToList();
+        var fork = road.Entity.Get<RoadForkComponent>()?.Spec;
+        var meshes = RoadMeshBuilder.Build(road.Frames, road.Section, curve.Closed, road.SidewalkFalloff, structures, ramps, fork);
         var roadWorld = road.Entity.Transform.WorldMatrix;
         var concrete = RoadStructureBuilder.Build(RoadStructureBuilder.Unrolled(road.Frames, curve.Closed), road.Section, structures,
             local => GroundUnder(roadWorld, local));
@@ -227,19 +278,112 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         return Vector3.TransformCoordinate(world, Matrix.Invert(roadWorld)).Y;
     }
 
-    /// <summary>A point as the road's maths takes it, in metres in its road's space.</summary>
-    private static CurvePoint ToCurvePoint(Entity point)
+    /// <summary>
+    /// A point as the road's maths takes it, in metres in its road's space. Its rotation turns the road from the way it
+    /// would run through it on its own (which its gizmo shows, see <see cref="GizmoFrame"/>); set to follow its rotation,
+    /// the road runs the way it faces instead, banked by how far it rolls about that way.
+    /// </summary>
+    /// <summary>
+    /// Where a road's start (or end) is joined to a ramp's free end or another road's end, and the way the road runs
+    /// there, in its own space: none if that end is joined to nothing, or to something not built.
+    /// </summary>
+    public static (Vector3 Position, Vector3 Way)? JoinOf(RoadComponent road, bool atStart)
+    {
+        var (ramp, other, othersEnd) = atStart ? (road.FromRamp, road.FromRoad, road.FromRoadsEnd) : (road.ToRamp, road.ToRoad, road.ToRoadsEnd);
+        var (fork, forksLeft) = atStart ? (road.FromFork, road.FromForksLeft) : (road.ToFork, road.ToForksLeft);
+        var end = fork != null && fork.Entity?.Get<RoadComponent>() != road ? ForkEnd(fork, forksLeft)
+            : ramp != null ? RampEnd(ramp)
+            : other != null && other != road ? RoadEnd(other, othersEnd) : null;
+        if (end is not { } at)
+            return null;
+        var toRoad = Matrix.Invert(road.Entity.Transform.WorldMatrix);
+        // Out of what it joins, at its start; into it, at its end.
+        var way = Vector3.Normalize(Vector3.TransformNormal(at.Outward, toRoad));
+        return (Vector3.TransformCoordinate(at.Position, toRoad), atStart ? way : -way);
+    }
+
+    /// <summary>The shape of the fork on a road, as last built: none if it has none, isn't built, or can't part it.</summary>
+    public static RoadForkShape? ForkShape(RoadForkComponent fork)
+    {
+        if (fork.Entity?.Get<RoadComponent>() is not { } owner || owner.Frames.Count < 2 || owner.Closed)
+            return null;
+        var shape = new RoadForkShape(owner.Section, fork.Spec, owner.Frames[0].Distance, owner.Frames[^1].Distance);
+        return shape.Valid ? shape : null;
+    }
+
+    /// <summary>Where a fork's group (left or right) ends, for its branch, and the way out of the fork there, in the world.</summary>
+    public static (Vector3 Position, Vector3 Outward)? ForkEnd(RoadForkComponent fork, bool left)
+    {
+        if (ForkShape(fork) is not { } shape)
+            return null;
+        var owner = fork.Entity.Get<RoadComponent>()!;
+        var (position, outward) = shape.BranchEnd(owner.Frames, left);
+        var world = owner.Entity.Transform.WorldMatrix;
+        return (Vector3.TransformCoordinate(ToStride(position), world), Vector3.Normalize(Vector3.TransformNormal(ToStride(outward), world)));
+    }
+
+    /// <summary>Where a road's first (or last) frame is, and the way out of the road there, in the world: none if it isn't built.</summary>
+    public static (Vector3 Position, Vector3 Outward)? RoadEnd(RoadComponent road, bool last)
+    {
+        if (road.Entity == null || road.Frames.Count < 2)
+            return null;
+        var frame = last ? road.Frames[^1] : road.Frames[0];
+        var outward = last ? frame.Forward : -frame.Forward;
+        var world = road.Entity.Transform.WorldMatrix;
+        return (Vector3.TransformCoordinate(ToStride(frame.Position), world), Vector3.Normalize(Vector3.TransformNormal(ToStride(outward), world)));
+    }
+
+    /// <summary>The roads being built, for finding what to join to.</summary>
+    public IEnumerable<RoadComponent> Roads => ComponentDatas.Keys;
+
+    /// <summary>Where a ramp ends, away from its road, and the way out of it there, in the world: none if its road isn't built.</summary>
+    public static (Vector3 Position, Vector3 Outward)? RampEnd(RoadRampComponent ramp)
+    {
+        if (ramp.Entity?.Get<RoadComponent>() is not { } owner || owner.Frames.Count < 2)
+            return null;
+        var (position, outward) = RoadRampShaper.FreeEnd(owner.Frames, ramp.Spec, owner.Section);
+        var world = owner.Entity.Transform.WorldMatrix;
+        return (Vector3.TransformCoordinate(ToStride(position), world), Vector3.Normalize(Vector3.TransformNormal(ToStride(outward), world)));
+    }
+
+    private static Vector3 ToStride(NVector3 v) => new(v.X, v.Y, v.Z);
+
+    public static CurvePoint ToCurvePoint(Entity point)
     {
         var at = point.Transform.Position;
+        var rotation = point.Transform.Rotation;
         var settings = point.Get<RoadPointComponent>();
         NVector3? tangent = null;
-        if (settings is { FollowRotation: true })
+        var bank = 0f;
+        System.Numerics.Quaternion? turn = null;
+        if (settings is not { FollowRotation: true })
         {
-            var forward = Vector3.Transform(Vector3.UnitZ * -1f, point.Transform.Rotation);
-            tangent = new NVector3(forward.X, forward.Y, forward.Z);
+            if (MathF.Abs(rotation.W) < 0.99999f)
+                turn = new System.Numerics.Quaternion(rotation.X, rotation.Y, rotation.Z, rotation.W);
         }
-        return new CurvePoint(new NVector3(at.X, at.Y, at.Z), tangent, settings?.Handle ?? 1f / 3f);
+        else
+        {
+            var forward = ToNumerics(Vector3.Transform(-Vector3.UnitZ, rotation));
+            var right = ToNumerics(Vector3.Transform(Vector3.UnitX, rotation));
+            tangent = forward;
+            var (levelRight, levelUp) = RoadCurve.Level(forward);
+            bank = MathF.Atan2(NVector3.Dot(right, levelUp), NVector3.Dot(right, levelRight));
+        }
+        return new CurvePoint(ToNumerics(at), tangent, settings?.Handle ?? 1f / 3f, bank, turn);
     }
+
+    /// <summary>The rotation that faces a point (its forward, -Z) the way a road runs, level across.</summary>
+    public static Quaternion Facing(NVector3 tangent)
+    {
+        var (right, up) = RoadCurve.Level(tangent);
+        var axes = Matrix.Identity;
+        axes.Right = new Vector3(right.X, right.Y, right.Z);
+        axes.Up = new Vector3(up.X, up.Y, up.Z);
+        axes.Backward = -new Vector3(tangent.X, tangent.Y, tangent.Z);
+        return Quaternion.RotationMatrix(axes);
+    }
+
+    private static NVector3 ToNumerics(Vector3 v) => new(v.X, v.Y, v.Z);
 
     private static Mesh ToMesh(GraphicsDevice device, MeshData part)
     {

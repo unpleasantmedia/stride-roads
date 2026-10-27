@@ -79,6 +79,49 @@ public sealed class RoadComponent : EntityComponent
     [DataMember(110), Display(category: "Shape"), DefaultValue(true)]
     public bool Collision { get; set; } = true;
 
+    /// <summary>
+    /// The ramp this road carries on from, if any: its first point is held at the middle of the ramp's lanes where it
+    /// has come away from its road, and it runs on from there the way the ramp does.
+    /// </summary>
+    [DataMember(120), Display(category: "Joins")]
+    public RoadRampComponent? FromRamp { get; set; }
+
+    /// <summary>The road whose end this road carries on from, if any (and no <see cref="FromRamp"/>): its first point is held there.</summary>
+    [DataMember(130), Display(category: "Joins")]
+    public RoadComponent? FromRoad { get; set; }
+
+    /// <summary>Whether it carries on from <see cref="FromRoad"/>'s last point, rather than its first.</summary>
+    [DataMember(140), Display(category: "Joins"), DefaultValue(true)]
+    public bool FromRoadsEnd { get; set; } = true;
+
+    /// <summary>The ramp this road runs into, if any: its last point is held at the ramp's free end, arriving the way the ramp runs.</summary>
+    [DataMember(150), Display(category: "Joins")]
+    public RoadRampComponent? ToRamp { get; set; }
+
+    /// <summary>The road whose end this road runs into, if any (and no <see cref="ToRamp"/>): its last point is held there.</summary>
+    [DataMember(160), Display(category: "Joins")]
+    public RoadComponent? ToRoad { get; set; }
+
+    /// <summary>Whether it runs into <see cref="ToRoad"/>'s last point, rather than its first.</summary>
+    [DataMember(170), Display(category: "Joins"), DefaultValue(false)]
+    public bool ToRoadsEnd { get; set; }
+
+    /// <summary>The fork this road carries on from as a branch, if any: its first point is held at the end of one of its groups.</summary>
+    [DataMember(180), Display(category: "Joins")]
+    public RoadForkComponent? FromFork { get; set; }
+
+    /// <summary>Whether it carries on from <see cref="FromFork"/>'s left group (the trunk's left), rather than its right.</summary>
+    [DataMember(190), Display(category: "Joins"), DefaultValue(false)]
+    public bool FromForksLeft { get; set; }
+
+    /// <summary>The fork this road runs into as a branch, if any: its last point is held at the end of one of its groups.</summary>
+    [DataMember(200), Display(category: "Joins")]
+    public RoadForkComponent? ToFork { get; set; }
+
+    /// <summary>Whether it runs into <see cref="ToFork"/>'s left group (the trunk's left), rather than its right.</summary>
+    [DataMember(210), Display(category: "Joins"), DefaultValue(false)]
+    public bool ToForksLeft { get; set; }
+
     // A material left empty draws with RoadMaterials' plain colour for it.
     [DataMember(200), Display(category: "Materials")]
     public Material? SurfaceMaterial { get; set; }

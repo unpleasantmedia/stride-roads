@@ -36,8 +36,8 @@ public static class RoadMaterials
 
     private static Set For(GraphicsDevice device) => Sets.GetValue(device, d => new Set
     {
-        // Asphalt and paint a little glossy, concrete and grass dull.
-        Asphalt = Make(d, Asphalt, 0.35f),
+        // Paint a little glossy; asphalt, concrete and grass dull.
+        Asphalt = Make(d, Asphalt, 0.1f),
         WhiteLine = Make(d, WhiteLine, 0.4f),
         YellowLine = Make(d, YellowLine, 0.4f),
         Sidewalk = Make(d, Sidewalk, 0.15f),

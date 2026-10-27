@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using System.Numerics;
 using Stride.Roads;
@@ -32,6 +33,37 @@ public class RoadCurveTests
             var level = Vector3.Normalize(frame.Forward with { Y = 0 });
             Assert.Equal(0f, Vector3.Dot(level, frame.Right), 3);
         }
+    }
+
+    [Fact]
+    public void BankEasesBetweenPointsAndRaisesTheRightEdge()
+    {
+        var bank = MathF.PI / 6f;
+        var curve = new RoadCurve(new[] { new CurvePoint(Vector3.Zero), new CurvePoint(new Vector3(0, 0, -20), Bank: bank) });
+        var frames = curve.Frames();
+        Assert.Equal(0f, frames[0].Right.Y, 4);
+        Assert.Equal(MathF.Sin(bank), frames[^1].Right.Y, 3);
+        Assert.InRange(frames[frames.Count / 2].Right.Y, 0.1f, MathF.Sin(bank) - 0.1f);
+        foreach (var frame in frames)
+        {
+            Assert.Equal(0f, Vector3.Dot(frame.Forward, frame.Right), 3);
+            Assert.True(frame.Up.Y > 0f);
+        }
+    }
+
+    [Fact]
+    public void TurnBendsFromTheWayTheRoadRuns()
+    {
+        // A road running +X, its middle point turned 30° about up: it bends sideways there, still mostly running +X.
+        var turn = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 6f);
+        var curve = new RoadCurve(new[]
+        {
+            new CurvePoint(Vector3.Zero), new CurvePoint(new Vector3(20, 0, 0), Turn: turn), new CurvePoint(new Vector3(40, 0, 0)),
+        });
+        var tangent = curve.TangentAt(1);
+        Assert.Equal(MathF.Cos(MathF.PI / 6f), tangent.X, 3);
+        Assert.Equal(0.5f, MathF.Abs(tangent.Z), 3);
+        Assert.Equal(0f, curve.BankOf(1), 3);
     }
 
     [Fact]
@@ -139,5 +171,46 @@ public class RoadMeshTests
             }
         }
         Assert.True(up > 0, "no deck triangles");
+    }
+
+    [Fact]
+    public void ForkPartsItsLanesIntoTwoBranches()
+    {
+        // A two-lane one-way road down -Z, forking at its end: its branches' ends either side of its middle, the gore between them.
+        var curve = new RoadCurve(new[] { new CurvePoint(Vector3.Zero), new CurvePoint(new Vector3(0, 0, -100)) });
+        var frames = curve.Frames();
+        var section = RoadCrossSection.OneWay(2);
+        var fork = new ForkSpec(true, 40f, 1, 2f);
+        var shape = new RoadForkShape(section, fork, frames[0].Distance, frames[^1].Distance);
+        Assert.True(shape.Valid);
+        var (left, _) = shape.BranchEnd(frames, true);
+        var (right, outward) = shape.BranchEnd(frames, false);
+        Assert.True(left.X < 0f && right.X > 0f);
+        Assert.True(outward.Z < -0.99f);
+        var end = shape.Across(frames[^1].Distance);
+        Assert.Equal(fork.Separation, end.InR - end.InL, 2);
+        Assert.True(shape.FlowsOut(true) && shape.FlowsOut(false));
+        var meshes = RoadMeshBuilder.Build(frames, section, false, fork: fork);
+        Assert.Contains(meshes.Surface.Vertices, v => v.X < -section.Width / 2f - 1f);
+
+        // Both ways: its backward lanes go left, coming in from their branch.
+        var twoWay = new RoadForkShape(RoadCrossSection.TwoLane, fork, frames[0].Distance, frames[^1].Distance);
+        Assert.False(twoWay.FlowsOut(true));
+        Assert.True(twoWay.FlowsOut(false));
+    }
+
+    [Fact]
+    public void ExitRampPeelsAwayOnItsSide()
+    {
+        // Running down -Z, right is +X: an exit on the right separates at its far end, Separation out from the lane edge.
+        var curve = new RoadCurve(new[] { new CurvePoint(Vector3.Zero), new CurvePoint(new Vector3(0, 0, -300)) });
+        var section = RoadCrossSection.TwoLane;
+        var ramp = new RampSpec(50f, 120f, RoadSide.Right, RampKind.Exit);
+        var meshes = RoadMeshBuilder.Build(curve.Frames(), section, false, ramps: new[] { ramp });
+        var laneEdge = RoadRampShaper.LaneEdge(ramp, section);
+        var far = meshes.Surface.Vertices.Max(v => v.X);
+        Assert.True(far >= laneEdge + ramp.Separation, $"reached only {far}");
+        // Nothing of it on the left, nor before it starts.
+        Assert.True(meshes.Surface.Vertices.Where(v => v.Z > -45f).All(v => v.X <= section.Width / 2f + 1e-3f));
     }
 }

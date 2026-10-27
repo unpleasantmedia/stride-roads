@@ -75,9 +75,9 @@ public readonly record struct RoadMarking(MarkingKind Kind, float Offset);
 /// The bank is the terrain's, shaped by fitting it to the road; it is not part of the road.
 /// </para>
 /// <para>
-/// A side may have a sidewalk instead of its shoulder, <see cref="SidewalkLeft"/> or <see cref="SidewalkRight"/>
-/// metres wide (none at 0) from the edge of the outer lane, <see cref="CurbHeight"/> above the road behind
-/// its curb there; the bank then starts past it. The lanes lie where they would without it.
+/// A side may have a sidewalk past its shoulder, <see cref="SidewalkLeft"/> or <see cref="SidewalkRight"/>
+/// metres wide (none at 0), <see cref="CurbHeight"/> above the road behind its curb at the shoulder's edge; the
+/// bank then starts past it. The lanes lie where they would without it.
 /// </para>
 /// </summary>
 public sealed record RoadCrossSection(
@@ -135,11 +135,11 @@ public sealed record RoadCrossSection(
         var bands = new List<RoadBand>();
         // Where the left shoulder starts: a road both ways is centred on its median, or on the line
         // between its directions; one way only, on its lanes.
-        // Where the lanes start is where it would be without sidewalks; a sidewalk takes its side's shoulder's place.
+        // Where the lanes start is where it would be without sidewalks: those are past the shoulders.
         var lanesLeft = BothWays
             ? -(BackwardLanes * LaneWidth + (HasMedian ? MedianWidth / 2f : 0f))
             : -Width / 2f + ShoulderWidth;
-        var left = lanesLeft - (SidewalkLeft > 0f ? SidewalkLeft : ShoulderWidth);
+        var left = lanesLeft - ShoulderWidth - SidewalkLeft;
 
         void Add(BandKind kind, float width, LaneDirection? direction = null)
         {
@@ -149,7 +149,8 @@ public sealed record RoadCrossSection(
 
         if (SidewalkLeft > 0f)
             Add(BandKind.Sidewalk, SidewalkLeft);
-        else
+        // A side with a sidewalk has no shoulder at all, rather than one of no width.
+        if (SidewalkLeft <= 0f || ShoulderWidth > 0f)
             Add(BandKind.Shoulder, ShoulderWidth);
         for (var lane = 0; lane < BackwardLanes; lane++)
             Add(BandKind.Lane, LaneWidth, LaneDirection.Backward);
@@ -157,10 +158,10 @@ public sealed record RoadCrossSection(
             Add(BandKind.Median, MedianWidth);
         for (var lane = 0; lane < ForwardLanes; lane++)
             Add(BandKind.Lane, LaneWidth, LaneDirection.Forward);
+        if (SidewalkRight <= 0f || ShoulderWidth > 0f)
+            Add(BandKind.Shoulder, ShoulderWidth);
         if (SidewalkRight > 0f)
             Add(BandKind.Sidewalk, SidewalkRight);
-        else
-            Add(BandKind.Shoulder, ShoulderWidth);
         return bands;
     }
 
