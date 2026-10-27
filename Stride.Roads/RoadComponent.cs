@@ -100,10 +100,6 @@ public sealed class RoadComponent : EntityComponent
     [DataMember(250), Display(category: "Materials")]
     public Material? StructureMaterial { get; set; }
 
-    /// <summary>The viaducts carrying it: the <see cref="RoadViaductComponent"/>s on its entity.</summary>
-    [DataMemberIgnore]
-    public List<StructureSpec> Structures => Entity?.GetAll<RoadViaductComponent>().Select(v => v.Spec).ToList() ?? new List<StructureSpec>();
-
     /// <summary>What the road looks like across.</summary>
     [DataMemberIgnore]
     public RoadCrossSection Section => new(

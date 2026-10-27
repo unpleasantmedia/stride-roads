@@ -7,24 +7,16 @@ using Stride.Engine.Design;
 namespace Stride.Roads;
 
 /// <summary>
-/// A viaduct carrying the road whose entity it is on, over <see cref="Length"/> metres from <see cref="Start"/> along
-/// it: a deck under the road, barriers along its edges, and pillars down to the ground. Along it the road has no
-/// skirts or banks. A road can have several.
+/// A viaduct: a deck under the road, barriers along its edges, and pillars down to the ground; along it the road has no
+/// skirts or banks. Where it is on says what it carries: on a road's entity, the whole road; on one of its points, the
+/// road from that point to the next (on a ring, the last point's runs back round to the first; on an open road, the last
+/// point's carries nothing).
 /// </summary>
 [DataContract("RoadViaductComponent")]
 [Display("Road viaduct")]
 [ComponentCategory("Roads")]
-[AllowMultipleComponents]
 public sealed class RoadViaductComponent : EntityComponent
 {
-    /// <summary>How far along the road it begins, in metres.</summary>
-    [DataMember(0), DataMemberRange(0, 100000, 0.5, 5, 1), DefaultValue(0f)]
-    public float Start { get; set; }
-
-    /// <summary>How long it is, in metres.</summary>
-    [DataMember(10), DataMemberRange(1, 100000, 0.5, 5, 1), DefaultValue(60f)]
-    public float Length { get; set; } = 60f;
-
     /// <summary>How thick its deck is under the road, in metres.</summary>
     [DataMember(20), DataMemberRange(0.3, 5, 0.05, 0.5, 2), DefaultValue(1.2f)]
     public float DeckDepth { get; set; } = 1.2f;
@@ -45,7 +37,7 @@ public sealed class RoadViaductComponent : EntityComponent
     [DataMember(60), DataMemberRange(0.3, 10, 0.05, 0.5, 2), DefaultValue(1.5f)]
     public float PillarWidth { get; set; } = 1.5f;
 
-    /// <summary>It, as the road's maths takes it.</summary>
-    [DataMemberIgnore]
-    public StructureSpec Spec => new(Start, Length, DeckDepth, BarrierHeight, BarrierWidth, PillarSpacing, PillarWidth);
+    /// <summary>It, as the road's maths takes it, over this stretch of the road (from and to, in metres along it).</summary>
+    public StructureSpec Over(float from, float to) =>
+        new(from, to - from, DeckDepth, BarrierHeight, BarrierWidth, PillarSpacing, PillarWidth);
 }

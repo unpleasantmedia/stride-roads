@@ -87,8 +87,8 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         hash.Add(road.SidewalkMaterial);
         hash.Add(road.BankMaterial);
         hash.Add(road.StructureMaterial);
-        foreach (var structure in road.Structures)
-            hash.Add(structure);
+        foreach (var viaduct in road.Entity.GetAll<RoadViaductComponent>())
+            hash.Add(viaduct.Over(0f, 0f));
         // Where it is in the world, for how far its viaducts' pillars reach down.
         hash.Add(road.Entity.Transform.WorldMatrix);
         foreach (var point in Points(road))
@@ -100,8 +100,32 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
                 hash.Add(settings.FollowRotation);
                 hash.Add(settings.Handle);
             }
+            foreach (var viaduct in point.GetAll<RoadViaductComponent>())
+                hash.Add(viaduct.Over(0f, 0f));
+            // Which point the viaducts are on.
+            hash.Add(-1);
         }
         return hash.ToHashCode();
+    }
+
+    /// <summary>
+    /// A road's viaducts, as stretches along it: one on the road's entity carries all of it; one on a point, the road
+    /// from that point to the next. <paramref name="pointsAt"/> is how far along the road each point is (and, last, its
+    /// whole length).
+    /// </summary>
+    private static List<StructureSpec> Structures(RoadComponent road, List<Entity> points, float[] pointsAt)
+    {
+        var structures = new List<StructureSpec>();
+        var length = pointsAt[^1];
+        foreach (var viaduct in road.Entity.GetAll<RoadViaductComponent>())
+            structures.Add(viaduct.Over(0f, length));
+        // pointsAt has an entry past the last point: on a ring, its way back round to the first; on an open road, none.
+        for (var i = 0; i < points.Count && i + 1 < pointsAt.Length; i++)
+        {
+            foreach (var viaduct in points[i].GetAll<RoadViaductComponent>())
+                structures.Add(viaduct.Over(pointsAt[i], pointsAt[i + 1]));
+        }
+        return structures;
     }
 
     private void Rebuild(RoadComponent road, Built data)
@@ -118,8 +142,8 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         }
 
         var curve = new RoadCurve(points.Select(ToCurvePoint).ToList(), road.Closed);
-        road.Frames = curve.Frames(RoadComponent.Spacing);
-        var structures = road.Structures;
+        road.Frames = curve.Frames(RoadComponent.Spacing, out var pointsAt);
+        var structures = Structures(road, points, pointsAt);
         var meshes = RoadMeshBuilder.Build(road.Frames, road.Section, curve.Closed, road.SidewalkFalloff, structures);
         var roadWorld = road.Entity.Transform.WorldMatrix;
         var concrete = RoadStructureBuilder.Build(RoadStructureBuilder.Unrolled(road.Frames, curve.Closed), road.Section, structures,
