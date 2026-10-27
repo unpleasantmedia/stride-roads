@@ -86,6 +86,11 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         hash.Add(road.YellowLineMaterial);
         hash.Add(road.SidewalkMaterial);
         hash.Add(road.BankMaterial);
+        hash.Add(road.StructureMaterial);
+        foreach (var structure in road.Structures)
+            hash.Add(structure);
+        // Where it is in the world, for how far its viaducts' pillars reach down.
+        hash.Add(road.Entity.Transform.WorldMatrix);
         foreach (var point in Points(road))
         {
             hash.Add(point.Transform.Position);
@@ -114,9 +119,13 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
 
         var curve = new RoadCurve(points.Select(ToCurvePoint).ToList(), road.Closed);
         road.Frames = curve.Frames(RoadComponent.Spacing);
-        var meshes = RoadMeshBuilder.Build(road.Frames, road.Section, curve.Closed, road.SidewalkFalloff);
+        var structures = road.Structures;
+        var meshes = RoadMeshBuilder.Build(road.Frames, road.Section, curve.Closed, road.SidewalkFalloff, structures);
+        var roadWorld = road.Entity.Transform.WorldMatrix;
+        var concrete = RoadStructureBuilder.Build(RoadStructureBuilder.Unrolled(road.Frames, curve.Closed), road.Section, structures,
+            local => GroundUnder(roadWorld, local));
 
-        var parts = new[] { meshes.Surface, meshes.WhiteLines, meshes.YellowLines, meshes.Banks, meshes.Sidewalks };
+        var parts = new[] { meshes.Surface, meshes.WhiteLines, meshes.YellowLines, meshes.Banks, meshes.Sidewalks, concrete };
         // Where it has no material of its own, a plain colour (RoadMaterials).
         var materials = new[]
         {
@@ -125,6 +134,7 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
             road.YellowLineMaterial ?? RoadMaterials.DefaultYellowLine(device),
             road.BankMaterial ?? RoadMaterials.DefaultBank(device),
             road.SidewalkMaterial ?? RoadMaterials.DefaultSidewalk(device),
+            road.StructureMaterial ?? RoadMaterials.DefaultConcrete(device),
         };
         var model = new Model();
         var bounds = BoundingBox.Empty;
@@ -148,17 +158,17 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
             root.Entities.Add(data.Holder);
         }
         data.Holder.Get<ModelComponent>()!.Model = model;
-        UpdateCollision(road, data.Holder, meshes);
+        UpdateCollision(road, data.Holder, meshes, concrete);
         data.Holder.EnableAll(true, true);
         Release(data.Model);
         data.Model = model;
     }
 
     /// <summary>
-    /// Gives what a road builds a static collider of its asphalt, banks and sidewalks (the lines lie on the asphalt), made
-    /// again with its shape; none if the road has no collision. In the game only: the editor never steps physics.
+    /// Gives what a road builds a static collider of its asphalt, banks, sidewalks and viaducts (the lines lie on the
+    /// asphalt), made again with its shape; none if the road has no collision. In the game only: the editor never steps physics.
     /// </summary>
-    private void UpdateCollision(RoadComponent road, Entity holder, RoadMeshes meshes)
+    private void UpdateCollision(RoadComponent road, Entity holder, RoadMeshes meshes, MeshData concrete)
     {
         if (holder.Get<StaticColliderComponent>() is { } previous)
         {
@@ -171,7 +181,7 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
 
         var vertices = new List<Vector3>();
         var indices = new List<int>();
-        foreach (var part in new[] { meshes.Surface, meshes.Banks, meshes.Sidewalks })
+        foreach (var part in new[] { meshes.Surface, meshes.Banks, meshes.Sidewalks, concrete })
         {
             var start = vertices.Count;
             vertices.AddRange(part.Vertices.Select(v => new Vector3(v.X, v.Y, v.Z)));
@@ -180,6 +190,17 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         if (indices.Count == 0)
             return;
         holder.Add(new StaticColliderComponent { ColliderShape = new StaticMeshColliderShape(vertices, indices) });
+    }
+
+    /// <summary>
+    /// How high the ground is under a point of a road's frames (in its space), for how far its viaducts' pillars reach
+    /// down: the world's ground plane (y = 0) for now, as Stride has no terrain of its own to ask.
+    /// </summary>
+    private static float? GroundUnder(Matrix roadWorld, NVector3 local)
+    {
+        var world = Vector3.TransformCoordinate(new Vector3(local.X, local.Y, local.Z), roadWorld);
+        world.Y = 0f;
+        return Vector3.TransformCoordinate(world, Matrix.Invert(roadWorld)).Y;
     }
 
     /// <summary>A point as the road's maths takes it, in metres in its road's space.</summary>

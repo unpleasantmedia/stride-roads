@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using Stride.Core;
 using Stride.Core.Annotations;
 using Stride.Engine;
@@ -94,6 +95,14 @@ public sealed class RoadComponent : EntityComponent
     /// <summary>The banks sloping away past the shoulders.</summary>
     [DataMember(240), Display(category: "Materials")]
     public Material? BankMaterial { get; set; }
+
+    /// <summary>Its viaducts' concrete: decks, barriers and pillars.</summary>
+    [DataMember(250), Display(category: "Materials")]
+    public Material? StructureMaterial { get; set; }
+
+    /// <summary>The viaducts carrying it: the <see cref="RoadViaductComponent"/>s on its entity.</summary>
+    [DataMemberIgnore]
+    public List<StructureSpec> Structures => Entity?.GetAll<RoadViaductComponent>().Select(v => v.Spec).ToList() ?? new List<StructureSpec>();
 
     /// <summary>What the road looks like across.</summary>
     [DataMemberIgnore]

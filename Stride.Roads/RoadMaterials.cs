@@ -18,10 +18,11 @@ public static class RoadMaterials
     public static readonly Color4 YellowLine = new(0.9f, 0.62f, 0.05f, 1f);
     public static readonly Color4 Sidewalk = new(0.42f, 0.41f, 0.39f, 1f);
     public static readonly Color4 Bank = new(0.16f, 0.24f, 0.09f, 1f);
+    public static readonly Color4 Concrete = new(0.5f, 0.49f, 0.46f, 1f);
 
     private sealed class Set
     {
-        public Material Asphalt = null!, WhiteLine = null!, YellowLine = null!, Sidewalk = null!, Bank = null!;
+        public Material Asphalt = null!, WhiteLine = null!, YellowLine = null!, Sidewalk = null!, Bank = null!, Concrete = null!;
     }
 
     private static readonly ConditionalWeakTable<GraphicsDevice, Set> Sets = new();
@@ -31,6 +32,7 @@ public static class RoadMaterials
     public static Material DefaultYellowLine(GraphicsDevice device) => For(device).YellowLine;
     public static Material DefaultSidewalk(GraphicsDevice device) => For(device).Sidewalk;
     public static Material DefaultBank(GraphicsDevice device) => For(device).Bank;
+    public static Material DefaultConcrete(GraphicsDevice device) => For(device).Concrete;
 
     private static Set For(GraphicsDevice device) => Sets.GetValue(device, d => new Set
     {
@@ -40,6 +42,7 @@ public static class RoadMaterials
         YellowLine = Make(d, YellowLine, 0.4f),
         Sidewalk = Make(d, Sidewalk, 0.15f),
         Bank = Make(d, Bank, 0.05f),
+        Concrete = Make(d, Concrete, 0.1f),
     });
 
     private static Material Make(GraphicsDevice device, Color4 color, float gloss) => Material.New(device, new MaterialDescriptor
