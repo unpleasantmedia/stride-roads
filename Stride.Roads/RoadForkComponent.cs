@@ -34,7 +34,11 @@ public sealed class RoadForkComponent : EntityComponent
     [DataMember(30), DataMemberRange(0, 30, 0.1, 1, 1), DefaultValue(2f)]
     public float Separation { get; set; } = 2f;
 
+    /// <summary>What stands along its gore, between its groups once they have parted.</summary>
+    [DataMember(40), DefaultValue(RoadBarrier.Rail)]
+    public RoadBarrier GoreBarrier { get; set; } = RoadBarrier.Rail;
+
     /// <summary>It, as the road's maths takes it.</summary>
     [DataMemberIgnore]
-    public ForkSpec Spec => new(AtEnd, Length, LeftLanes, Separation);
+    public ForkSpec Spec => new(AtEnd, Length, LeftLanes, Separation, GoreBarrier);
 }

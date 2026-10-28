@@ -13,6 +13,7 @@ namespace Stride.Roads;
 [DataContract("RoadNetworkComponent")]
 [Display("Road network")]
 [ComponentCategory("Roads")]
+[ComponentOrder(30000)]
 public sealed class RoadNetworkComponent : EntityComponent
 {
     /// <summary>The roads in this network, in order: its entity's children with a road on.</summary>

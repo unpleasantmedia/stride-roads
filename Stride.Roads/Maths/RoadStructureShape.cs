@@ -36,6 +36,9 @@ public static class RoadStructureBuilder
     /// <summary>The widest a road is carried on one pillar; wider ones stand on a row of them.</summary>
     public const float PillarReach = 12f;
 
+    /// <summary>How far at a time a pillar slides along its span, off a road below, to find clear ground.</summary>
+    public const float PillarSlide = 1f;
+
     /// <summary>The concrete's texture repeats every this many metres.</summary>
     public const float TextureSize = 4f;
 
@@ -54,11 +57,59 @@ public static class RoadStructureBuilder
         {
             var stretch = RoadCurve.Trim(frames, Math.Max(structure.Start, frames[0].Distance), Math.Min(structure.End, frames[^1].Distance));
             if (stretch.Count >= 2)
-                Viaduct(mesh, stretch, left, right, structure, ground);
+                Viaduct(mesh, stretch, _ => left, _ => right, structure, ground);
         }
 
         return mesh;
     }
+
+    /// <summary>
+    /// The viaducts along a fork's stretch of its trunk: a deck under each of its groups, easing apart with it, with a
+    /// barrier along each outer edge, and along each inner edge once they have parted (until then the two decks meet).
+    /// </summary>
+    public static MeshData BuildFork(IReadOnlyList<RoadFrame> frames, RoadForkShape fork, IReadOnlyList<StructureSpec> structures, Func<Vector3, float?> ground)
+    {
+        var mesh = new MeshData();
+        foreach (var structure in structures)
+        {
+            var (from, to) = (Math.Max(structure.Start, fork.From), Math.Min(structure.End, fork.To));
+            if (to - from < 0.5f)
+                continue;
+            var stretch = RoadCurve.Trim(frames, from, to);
+            if (stretch.Count < 2)
+                continue;
+            var inner = structure with { BarrierHeight = 0f };
+            Viaduct(mesh, stretch, f => fork.Across(f.Distance).OutL, f => fork.Across(f.Distance).InL, inner, ground);
+            Viaduct(mesh, stretch, f => fork.Across(f.Distance).InR, f => fork.Across(f.Distance).OutR, inner, ground);
+            if (structure.BarrierHeight <= 0f)
+                continue;
+            DeckBarrier(mesh, stretch, f => fork.Across(f.Distance).OutL, 1f, structure);
+            DeckBarrier(mesh, stretch, f => fork.Across(f.Distance).OutR, -1f, structure);
+            // Inner ones only where the decks have parted, each facing its own lanes.
+            var run = new List<RoadFrame>();
+            foreach (var frame in stretch.Append(default))
+            {
+                if (frame.Forward != default && !fork.Together(frame.Distance))
+                {
+                    run.Add(frame);
+                    continue;
+                }
+                if (run.Count >= 2)
+                {
+                    DeckBarrier(mesh, run, f => fork.Across(f.Distance).InL, -1f, structure);
+                    DeckBarrier(mesh, run, f => fork.Across(f.Distance).InR, 1f, structure);
+                }
+                run = new List<RoadFrame>();
+            }
+        }
+
+        return mesh;
+    }
+
+    /// <summary>Structures with a stretch along the road taken out of them: each cut in two around it, or shortened, or gone.</summary>
+    public static IReadOnlyList<StructureSpec> Without(IReadOnlyList<StructureSpec> structures, float from, float to) =>
+        structures.SelectMany(s => s.End <= from || s.Start >= to ? new[] { s }
+            : new[] { s with { Length = from - s.Start }, s with { Start = to, Length = s.End - to } }.Where(p => p.Length > 0.01f)).ToList();
 
     /// <summary>
     /// A ring's frames as an open road's: its first frame again at its end, at its whole length, so
@@ -91,51 +142,68 @@ public static class RoadStructureBuilder
         return runs.Where(r => r.Count >= 2).ToList();
     }
 
-    private static void Viaduct(MeshData mesh, IReadOnlyList<RoadFrame> stretch, float left, float right, StructureSpec viaduct, Func<Vector3, float?> ground)
+    private static void Viaduct(MeshData mesh, IReadOnlyList<RoadFrame> stretch, Func<RoadFrame, float> leftAt, Func<RoadFrame, float> rightAt,
+        StructureSpec viaduct, Func<Vector3, float?> ground)
     {
         var depth = viaduct.DeckDepth;
         var up = Vector3.UnitY;
         // The deck: its sides from the barriers' feet down, and its underside.
-        Sheet(mesh, stretch, f => (f.Across(left) - up * depth, f.Across(left)), f => -f.Right);
-        Sheet(mesh, stretch, f => (f.Across(right), f.Across(right) - up * depth), f => f.Right);
-        Sheet(mesh, stretch, f => (f.Across(right) - up * depth, f.Across(left) - up * depth), _ => -up);
+        Sheet(mesh, stretch, f => (f.Across(leftAt(f)) - up * depth, f.Across(leftAt(f))), f => -f.Right);
+        Sheet(mesh, stretch, f => (f.Across(rightAt(f)), f.Across(rightAt(f)) - up * depth), f => f.Right);
+        Sheet(mesh, stretch, f => (f.Across(rightAt(f)) - up * depth, f.Across(leftAt(f)) - up * depth), _ => -up);
 
-        // A barrier along each edge: its outer face on up from the deck's side, its top, its inner face (none, with no height).
-        foreach (var (edge, inward) in viaduct.BarrierHeight > 0f ? new[] { (left, 1f), (right, -1f) } : Array.Empty<(float, float)>())
+        // A barrier along each edge (none, with no height).
+        if (viaduct.BarrierHeight > 0f)
         {
-            var inner = edge + inward * viaduct.BarrierWidth;
-            var height = up * viaduct.BarrierHeight;
-            Sheet(mesh, stretch, f => (f.Across(edge), f.Across(edge) + height), f => -inward * f.Right);
-            Sheet(mesh, stretch, f => (f.Across(edge) + height, f.Across(inner) + height), _ => up);
-            Sheet(mesh, stretch, f => (f.Across(inner) + height, f.Across(inner)), f => inward * f.Right);
-            // Closed at both ends.
-            foreach (var (frame, outward) in new[] { (stretch[0], -stretch[0].Forward), (stretch[^1], stretch[^1].Forward) })
-                Face(mesh, frame.Across(edge), frame.Across(inner), frame.Across(inner) + height, frame.Across(edge) + height, Level(outward));
+            DeckBarrier(mesh, stretch, leftAt, 1f, viaduct);
+            DeckBarrier(mesh, stretch, rightAt, -1f, viaduct);
         }
 
         // Its ends, where it meets the road on the ground: the deck's face across.
         foreach (var (frame, outward) in new[] { (stretch[0], -stretch[0].Forward), (stretch[^1], stretch[^1].Forward) })
-            Face(mesh, frame.Across(left) - up * depth, frame.Across(right) - up * depth, frame.Across(right), frame.Across(left), Level(outward));
+            Face(mesh, frame.Across(leftAt(frame)) - up * depth, frame.Across(rightAt(frame)) - up * depth, frame.Across(rightAt(frame)), frame.Across(leftAt(frame)), Level(outward));
 
         // Pillars in a row across under it every so often, from the deck down into the ground.
-        var width = right - left;
-        var count = Math.Max(1, (int)MathF.Ceiling(width / PillarReach));
         var length = stretch[^1].Distance - stretch[0].Distance;
         var spans = Math.Max(1, (int)MathF.Round(length / Math.Max(viaduct.PillarSpacing, 1f)));
         var spanLength = length / spans;
         for (var p = 0; p < spans; p++)
         {
-            var frame = RoadCurve.At(stretch, stretch[0].Distance + spanLength * (p + 0.5f));
-            for (var k = 0; k < count; k++)
+            // Mid-span, or as near it along the span as the whole row stands clear (the ground there known: not on a road below).
+            var middle = stretch[0].Distance + spanLength * (p + 0.5f);
+            for (var step = 0; step <= (int)(spanLength * 0.45f / PillarSlide) * 2; step++)
             {
-                var centre = frame.Across(left + width * (k + 0.5f) / count);
-                var top = centre.Y - depth;
-                // None where the ground is unknown, or up at the deck.
-                if (ground(centre) is not { } floor || floor >= top - 0.1f)
+                var shift = (step + 1) / 2 * PillarSlide * (step % 2 == 0 ? 1f : -1f);
+                var frame = RoadCurve.At(stretch, Math.Clamp(middle + shift, stretch[0].Distance, stretch[^1].Distance));
+                var (left, right) = (leftAt(frame), rightAt(frame));
+                var width = right - left;
+                var count = Math.Max(1, (int)MathF.Ceiling(width / PillarReach));
+                var row = Enumerable.Range(0, count).Select(k => frame.Across(left + width * (k + 0.5f) / count)).Select(c => (Centre: c, Floor: ground(c))).ToList();
+                if (row.Any(r => r.Floor == null))
                     continue;
-                Pillar(mesh, centre with { Y = top }, floor - PillarSink, viaduct.PillarWidth / 2f, Level(frame.Forward), Level(frame.Right));
+                foreach (var (centre, floor) in row)
+                {
+                    var top = centre.Y - depth;
+                    // None up at the deck.
+                    if (floor!.Value < top - 0.1f)
+                        Pillar(mesh, centre with { Y = top }, floor.Value - PillarSink, viaduct.PillarWidth / 2f, Level(frame.Forward), Level(frame.Right));
+                }
+                break;
             }
         }
+    }
+
+    /// <summary>A barrier along a deck's edge, facing inward (+1: to the right): its outer face on up from the deck's side, its top, its inner face, and its ends.</summary>
+    private static void DeckBarrier(MeshData mesh, IReadOnlyList<RoadFrame> stretch, Func<RoadFrame, float> edgeAt, float inward, StructureSpec viaduct)
+    {
+        var up = Vector3.UnitY;
+        var height = up * viaduct.BarrierHeight;
+        float Inner(RoadFrame f) => edgeAt(f) + inward * viaduct.BarrierWidth;
+        Sheet(mesh, stretch, f => (f.Across(edgeAt(f)), f.Across(edgeAt(f)) + height), f => -inward * f.Right);
+        Sheet(mesh, stretch, f => (f.Across(edgeAt(f)) + height, f.Across(Inner(f)) + height), _ => up);
+        Sheet(mesh, stretch, f => (f.Across(Inner(f)) + height, f.Across(Inner(f))), f => inward * f.Right);
+        foreach (var (frame, outward) in new[] { (stretch[0], -stretch[0].Forward), (stretch[^1], stretch[^1].Forward) })
+            Face(mesh, frame.Across(edgeAt(frame)), frame.Across(Inner(frame)), frame.Across(Inner(frame)) + height, frame.Across(edgeAt(frame)) + height, Level(outward));
     }
 
     /// <summary>A sheet along the stretch, from one edge to the other at each frame, facing the way normal says.</summary>

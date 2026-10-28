@@ -200,6 +200,76 @@ public class RoadMeshTests
     }
 
     [Fact]
+    public void TJunctionCutsItsRoadsBackAndPavesBetween()
+    {
+        // Three two-lane roads out of the origin: down -Z, up +Z, and off to +X.
+        var arms = new[] { -Vector3.UnitZ, Vector3.UnitZ, Vector3.UnitX }
+            .Select((d, i) => new JunctionArm(d, RoadCrossSection.TwoLane, true, s => new RoadFrame(d * s, d, Vector3.Normalize(Vector3.Cross(d, Vector3.UnitY)), s)))
+            .ToList();
+        var shape = RoadJunctionShaper.Build(Vector3.Zero, arms, 6f);
+        Assert.All(shape.Setbacks, s => Assert.True(s >= RoadJunctionShaper.MinimumSetback));
+        // The side road is cut back at least past the through road's edge.
+        Assert.True(shape.Setbacks[2] >= RoadCrossSection.TwoLane.Width / 2f, $"cut back only {shape.Setbacks[2]}");
+        Assert.False(shape.Surface.IsEmpty);
+        Assert.True(shape.Surface.Normals.All(n => n.Y > 0.5f) || shape.Surface.Vertices.Count > 0);
+    }
+
+    [Fact]
+    public void BarriersStandAlongTheEdges()
+    {
+        var curve = new RoadCurve(new[] { new CurvePoint(Vector3.Zero), new CurvePoint(new Vector3(0, 0, -50)) });
+        var section = RoadCrossSection.TwoLane;
+        var none = RoadMeshBuilder.Build(curve.Frames(), section, false);
+        Assert.True(none.Barriers.IsEmpty && none.Walls.IsEmpty);
+        var railed = RoadMeshBuilder.Build(curve.Frames(), section, false, barriers: new RoadBarriers(RoadBarrier.Rail, RoadBarrier.Rail, RoadBarrier.Concrete));
+        var edge = section.Width / 2f;
+        Assert.Contains(railed.Barriers.Vertices, v => v.X < -edge + RoadMeshBuilder.BarrierIn + 0.3f && v.X > -edge);
+        Assert.Contains(railed.Barriers.Vertices, v => v.X > edge - RoadMeshBuilder.BarrierIn - 0.3f && v.X < edge);
+        Assert.Contains(railed.Walls.Vertices, v => MathF.Abs(v.X) < 0.5f);
+    }
+
+    [Fact]
+    public void ParkingPavesOutAndPaintsItsBays()
+    {
+        var curve = new RoadCurve(new[] { new CurvePoint(Vector3.Zero), new CurvePoint(new Vector3(0, 0, -100)) });
+        var section = RoadCrossSection.TwoLane;
+        var spot = new ParkingSpec(ParkingKind.Perpendicular, RoadSide.Right, 20f, 40f, 2.5f, 5f, 60f);
+        var plain = RoadMeshBuilder.Build(curve.Frames(), section, false);
+        var parked = RoadMeshBuilder.Build(curve.Frames(), section, false, parking: new[] { spot });
+        var edge = section.Width / 2f;
+        Assert.DoesNotContain(plain.Surface.Vertices, v => v.X > edge + 1f);
+        Assert.Contains(parked.Surface.Vertices, v => v.X >= edge + spot.Depth - 0.01f);
+        Assert.True(parked.WhiteLines.Vertices.Count > plain.WhiteLines.Vertices.Count);
+        Assert.True(spot.Lines().Count() >= 10);
+    }
+
+    [Fact]
+    public void TJunctionStopsItsSideRoadAndACrossroadsHasLights()
+    {
+        JunctionArm Arm(Vector3 d) => new(d, RoadCrossSection.TwoLane, true, s => new RoadFrame(d * s, d, Vector3.Normalize(Vector3.Cross(d, Vector3.UnitY)), s));
+        var t = new[] { -Vector3.UnitZ, Vector3.UnitZ, Vector3.UnitX }.Select(Arm).ToList();
+        Assert.Equal(new[] { 2 }, RoadSignals.Controlled(t, TrafficControl.Auto));
+        Assert.False(RoadSignals.Lights(t, TrafficControl.Auto));
+        var cross = new[] { -Vector3.UnitZ, Vector3.UnitZ, Vector3.UnitX, -Vector3.UnitX }.Select(Arm).ToList();
+        Assert.True(RoadSignals.Lights(cross, TrafficControl.Auto));
+        var signals = RoadSignals.Build(RoadJunctionShaper.Build(Vector3.Zero, cross, 6f), cross, TrafficControl.Auto);
+        Assert.False(signals.Green.IsEmpty);
+        Assert.Equal(4, signals.Green.Vertices.Count / 9);
+    }
+
+    [Fact]
+    public void GoreHasChevronsAndARail()
+    {
+        var curve = new RoadCurve(new[] { new CurvePoint(Vector3.Zero), new CurvePoint(new Vector3(0, 0, -100)) });
+        var section = RoadCrossSection.OneWay(2) with { ShoulderWidth = 1.5f };
+        var meshes = RoadMeshBuilder.Build(curve.Frames(), section, false, fork: new ForkSpec(true, 60f, 1, 4f, RoadBarrier.Rail));
+        Assert.False(meshes.Barriers.IsEmpty);
+        var plain = RoadMeshBuilder.Build(curve.Frames(), section, false, fork: new ForkSpec(true, 60f, 1, 4f, RoadBarrier.None));
+        Assert.True(plain.Barriers.IsEmpty);
+        Assert.True(plain.WhiteLines.Vertices.Count > meshes.WhiteLines.Vertices.Count - 1);
+    }
+
+    [Fact]
     public void ExitRampPeelsAwayOnItsSide()
     {
         // Running down -Z, right is +X: an exit on the right separates at its far end, Separation out from the lane edge.

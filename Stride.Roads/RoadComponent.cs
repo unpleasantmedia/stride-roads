@@ -21,6 +21,7 @@ namespace Stride.Roads;
 [DataContract("RoadComponent")]
 [Display("Road", Expand = ExpandRule.Once)]
 [ComponentCategory("Roads")]
+[ComponentOrder(30010)]
 [DefaultEntityComponentProcessor(typeof(RoadProcessor), ExecutionMode = ExecutionMode.Runtime | ExecutionMode.Editor)]
 public sealed class RoadComponent : EntityComponent
 {
@@ -122,6 +123,66 @@ public sealed class RoadComponent : EntityComponent
     [DataMember(210), Display(category: "Joins"), DefaultValue(false)]
     public bool ToForksLeft { get; set; }
 
+    /// <summary>The junction this road starts at, if any: its first point is held at its middle, and it is cut back to meet it.</summary>
+    [DataMember(220), Display(category: "Joins")]
+    public RoadJunctionComponent? FromJunction
+    {
+        get => fromJunction;
+        set
+        {
+            fromJunction = value;
+            // None leaves its id be: the editor's copy of a new road for the game names a junction not there yet as
+            // none, and the game finds it by its id (see RoadProcessor.Relink). It goes with the junction.
+            if (value != null)
+                FromJunctionId = value.Id;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="FromJunction"/>'s id, kept with it: the editor hands the game a value like this reliably, but which
+    /// component a road names only once that component is there, so a new junction's can come as none. Cleared with it
+    /// by the editor's draw tool; a junction deleted, nothing has it.
+    /// </summary>
+    [DataMember(225), Display(category: "Joins")]
+    public Guid FromJunctionId { get; set; }
+
+    /// <summary>The junction this road ends at, if any: its last point is held at its middle, and it is cut back to meet it.</summary>
+    [DataMember(230), Display(category: "Joins")]
+    public RoadJunctionComponent? ToJunction
+    {
+        get => toJunction;
+        set
+        {
+            toJunction = value;
+            // None leaves its id be: the editor's copy of a new road for the game names a junction not there yet as
+            // none, and the game finds it by its id (see RoadProcessor.Relink). It goes with the junction.
+            if (value != null)
+                ToJunctionId = value.Id;
+        }
+    }
+
+    /// <summary><see cref="ToJunction"/>'s id, kept with it (see <see cref="FromJunctionId"/>).</summary>
+    [DataMember(235), Display(category: "Joins")]
+    public Guid ToJunctionId { get; set; }
+
+    private RoadJunctionComponent? fromJunction, toJunction;
+
+    /// <summary>What stands along its left edge, past its shoulder (and sidewalk): carried on along its ramps and forks on that side.</summary>
+    [DataMember(112), Display(category: "Barriers"), DefaultValue(RoadBarrier.None)]
+    public RoadBarrier LeftBarrier { get; set; }
+
+    /// <summary>What stands along its right edge, past its shoulder (and sidewalk): carried on along its ramps and forks on that side.</summary>
+    [DataMember(114), Display(category: "Barriers"), DefaultValue(RoadBarrier.None)]
+    public RoadBarrier RightBarrier { get; set; }
+
+    /// <summary>What stands down its middle, between its two directions, on a road both ways.</summary>
+    [DataMember(116), Display(category: "Barriers"), DefaultValue(RoadBarrier.None)]
+    public RoadBarrier MedianBarrier { get; set; }
+
+    /// <summary>Its barriers, as its maths takes them.</summary>
+    [DataMemberIgnore]
+    public RoadBarriers Barriers => new(LeftBarrier, RightBarrier, MedianBarrier);
+
     // A material left empty draws with RoadMaterials' plain colour for it.
     [DataMember(200), Display(category: "Materials")]
     public Material? SurfaceMaterial { get; set; }
@@ -135,9 +196,13 @@ public sealed class RoadComponent : EntityComponent
     [DataMember(230), Display(category: "Materials")]
     public Material? SidewalkMaterial { get; set; }
 
-    /// <summary>The banks sloping away past the shoulders.</summary>
+    /// <summary>The banks sloping away past the shoulders: as its surface (asphalt), left empty.</summary>
     [DataMember(240), Display(category: "Materials")]
     public Material? BankMaterial { get; set; }
+
+    /// <summary>Its guard rails, and its gores' (concrete barriers are drawn with <see cref="StructureMaterial"/>).</summary>
+    [DataMember(245), Display(category: "Materials")]
+    public Material? BarrierMaterial { get; set; }
 
     /// <summary>Its viaducts' concrete: decks, barriers and pillars.</summary>
     [DataMember(250), Display(category: "Materials")]

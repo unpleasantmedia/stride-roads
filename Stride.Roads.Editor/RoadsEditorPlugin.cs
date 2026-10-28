@@ -1,7 +1,12 @@
 using System;
 using System.IO;
 using System.Linq;
+using Stride.Core.Assets.Editor.Annotations;
 using Stride.Editor;
+using Stride.Roads;
+
+[assembly: TypeImage(typeof(RoadNetworkComponent), "RoadNetworkComponent.png")]
+[assembly: TypeImage(typeof(RoadComponent), "RoadComponent.png")]
 
 namespace Stride.Roads.Editor;
 

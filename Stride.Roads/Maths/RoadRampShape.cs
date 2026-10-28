@@ -41,7 +41,8 @@ public readonly record struct RampSpec(
     float Alongside = 0f,
     float EndAngle = 0f,
     float Sidewalk = 0f,
-    bool InnerSidewalk = false)
+    bool InnerSidewalk = false,
+    RoadBarrier Gore = RoadBarrier.Rail)
 {
     /// <summary>How long it takes to swing away from the road, after its taper and its run alongside.</summary>
     public float Diverge => MathF.Max(Length - Taper - Alongside, 0.01f);

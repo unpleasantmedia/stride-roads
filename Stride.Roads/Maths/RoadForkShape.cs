@@ -12,7 +12,7 @@ namespace Stride.Roads;
 /// <see cref="LeftLanes"/> lanes go one way and the rest the other; on one both ways, its two directions part.
 /// Whether it splits or merges is only which way the traffic goes.
 /// </summary>
-public readonly record struct ForkSpec(bool AtEnd = true, float Length = 40f, int LeftLanes = 1, float Separation = 2f);
+public readonly record struct ForkSpec(bool AtEnd = true, float Length = 40f, int LeftLanes = 1, float Separation = 2f, RoadBarrier Gore = RoadBarrier.Rail);
 
 /// <summary>A fork's shape along its trunk, from where it starts parting to where its branches carry on.</summary>
 public sealed class RoadForkShape

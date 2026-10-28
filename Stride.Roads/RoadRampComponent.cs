@@ -81,8 +81,12 @@ public sealed class RoadRampComponent : EntityComponent
     [DataMember(140), Display(category: "Sidewalks"), DefaultValue(false)]
     public bool InnerSidewalk { get; set; }
 
+    /// <summary>What stands along its gore, between it and the road where it has come away: none where a sidewalk is there.</summary>
+    [DataMember(150), DefaultValue(RoadBarrier.Rail)]
+    public RoadBarrier GoreBarrier { get; set; } = RoadBarrier.Rail;
+
     /// <summary>It, as the road's maths takes it.</summary>
     [DataMemberIgnore]
     public RampSpec Spec => new(Start, Length, Side, Kind, Lanes, LaneWidth, ShoulderWidth, Taper, Separation, ShoulderHeight, ShoulderAngle,
-        ExitLaneLength, EndAngle, Sidewalk, InnerSidewalk);
+        ExitLaneLength, EndAngle, Sidewalk, InnerSidewalk, GoreBarrier);
 }

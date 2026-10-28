@@ -16,6 +16,7 @@ using Stride.Core.Assets.Editor.ViewModel;
 using Stride.Core.BuildEngine;
 using Stride.Core.Diagnostics;
 using Stride.Core.Mathematics;
+using Stride.Core.Quantum;
 using Stride.Editor.EditorGame.Game;
 using Stride.Engine;
 using Stride.Input;
@@ -33,6 +34,13 @@ namespace Stride.Roads.Editor;
 /// starts a road carrying on from it, or selects the one that does;</item>
 /// <item>a new road started, or a road carried on past its last point, on another road's end or a ramp's free end
 /// (within <see cref="RampEndReach"/>) is joined to it there: that end of the road is held to it as it moves;</item>
+/// <item>likewise on a junction's middle, it joins the junction; and on the middle of another road, that road is split
+/// in two there with a new junction between them, which it joins (a T-junction, and drawing on across it from the
+/// junction, a crossroads);</item>
+/// <item>a road ended at a junction leaves its network selected, and the next click starts a road from that junction to
+/// there, carrying straight on across it;</item>
+/// <item>deleting a road (however) tidies the junctions it met: one left with a single road goes, that road a dead end;
+/// one left with two goes too, the two made one road where one ran on into the other, else joined end to end.</item>
 /// <item>a ctrl-click deletes the selected road's point nearest to where it lands, within <see cref="DeleteReach"/>.</item>
 /// </list>
 /// The selected road's outline (<see cref="RoadComponentGizmo"/>) turns from yellow to cyan while drawing is on.
@@ -81,7 +89,34 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         drawTool = new EditorTool("Stride.Roads.Draw", $"Draw roads ({ToggleKey})", RoadsEditorPlugin.LoadResource("DrawRoad.png"),
             () => IsDrawing, active => Interlocked.Exchange(ref requested, active ? 1 : 0), () => available);
         Tools = [drawTool];
+        var graph = editor.Asset.AssetHierarchyPropertyGraph;
+        foreach (var design in editor.Asset.Asset.Hierarchy.Parts.Values)
+        {
+            if (design.Entity.Get<RoadComponent>() != null)
+                roadIds.Add(design.Entity.Id);
+        }
+        graph.PartAdded += (_, e) =>
+        {
+            if (editor.Asset.Asset.Hierarchy.Parts.TryGetValue(e.PartId, out var design) && design.Entity.Get<RoadComponent>() != null)
+                roadIds.Add(e.PartId);
+        };
+        graph.PartRemoved += (_, e) =>
+        {
+            // A road deleted, not undone or redone (that puts back what was): tidy its junctions once it is all gone.
+            if (!roadIds.Remove(e.PartId) || editor.UndoRedoService.UndoRedoInProgress || tidyQueued)
+                return;
+            tidyQueued = true;
+            editor.Dispatcher.InvokeAsync(TidyJunctions);
+        };
     }
+
+    /// <summary>The scene's roads, by their entities' ids: to tell a road deleted from any other part.</summary>
+    private readonly HashSet<Guid> roadIds = new();
+
+    private bool tidyQueued;
+
+    /// <summary>The junction a road just ended at, and its network: the next click with that network selected starts a road from it.</summary>
+    private (Join Junction, AbsoluteId Network)? continueFrom;
 
     /// <summary>Whether drawing is on.</summary>
     public bool IsDrawing { get; private set; }
@@ -206,6 +241,17 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         var world = surface.PointAt(mouse);
         if (target.Network is { } network)
         {
+            if (!delete && continueFrom is { } carry && carry.Network == target.Id)
+            {
+                // On from the junction a road just ended at: a new road from there to here.
+                continueFrom = null;
+                var toNetwork = Matrix.Invert(network.Entity.Transform.WorldMatrix);
+                var (start, next) = (Vector3.TransformCoordinate(carry.Junction.Position, toNetwork), Vector3.TransformCoordinate(world, toNetwork));
+                var count = network.Entity.Transform.Children.Count;
+                editor.Dispatcher.InvokeAsync(() => AddRoad(target.Id, start, count, carry.Junction, next - start));
+                return;
+            }
+            continueFrom = null;
             if (!delete)
             {
                 var join = JoinAt(world, null);
@@ -216,6 +262,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
             return;
         }
 
+        continueFrom = null;
         var (road, roadId, selectedPoint) = (target.Road!, target.Id, target.Point);
         var toRoad = Matrix.Invert(road.Entity.Transform.WorldMatrix);
         var local = Vector3.TransformCoordinate(world, toRoad);
@@ -312,7 +359,11 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     /// Something a road's end can be joined to: a ramp's free end (the <see cref="RampIndex"/>th ramp on the road
     /// <see cref="Road"/>), or else one end of that road (its last, if <see cref="Last"/>). <see cref="Position"/> is in the world.
     /// </summary>
-    private readonly record struct Join(Guid Road, int? RampIndex, bool Last, Vector3 Position, bool? ForkLeft = null);
+    private readonly record struct Join(Guid Road, int? RampIndex, bool Last, Vector3 Position, bool? ForkLeft = null, bool Junction = false,
+        int? SplitIndex = null, Vector3 SplitLocal = default, Vector3 SplitInParent = default, float SplitAlong = 0f);
+
+    /// <summary>How near either end of a road a junction can split it, in metres.</summary>
+    public const float SplitFromEnd = 6f;
 
     /// <summary>The road end or ramp end nearest a place in the world, within <see cref="RampEndReach"/>, on any road but this one.</summary>
     private Join? JoinAt(Vector3 world, RoadComponent? except)
@@ -355,11 +406,228 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
                 ConsiderFork(other.Entity.Id, true, RoadProcessor.ForkEnd(fork, true));
                 ConsiderFork(other.Entity.Id, false, RoadProcessor.ForkEnd(fork, false));
             }
-            Consider(other.Entity.Id, null, false, RoadProcessor.RoadEnd(other, false));
-            Consider(other.Entity.Id, null, true, RoadProcessor.RoadEnd(other, true));
+            // Its ends, but not where a junction holds them: that is joined instead.
+            if (other.FromJunction == null)
+                Consider(other.Entity.Id, null, false, RoadProcessor.RoadEnd(other, false));
+            if (other.ToJunction == null)
+                Consider(other.Entity.Id, null, true, RoadProcessor.RoadEnd(other, true));
+        }
+        var junctions = game?.SceneSystem.SceneInstance?.Processors.OfType<RoadJunctionProcessor>().FirstOrDefault()?.Junctions.ToList();
+        foreach (var junction in junctions ?? new List<RoadJunctionComponent>())
+        {
+            var at = junction.Entity.Transform.WorldMatrix.TranslationVector;
+            var away = Vector2.Distance(new Vector2(at.X, at.Z), place);
+            if (away > bestAway)
+                continue;
+            bestAway = away;
+            best = new Join(junction.Entity.Id, null, false, at, Junction: true);
+        }
+        return best ?? SplitAt(world, except, processor);
+    }
+
+    /// <summary>
+    /// A place on the middle of another road (on it, and not within <see cref="SplitFromEnd"/> of either end) where a
+    /// junction can split it: the nearest, on its centre line.
+    /// </summary>
+    private static Join? SplitAt(Vector3 world, RoadComponent? except, RoadProcessor processor)
+    {
+        Join? best = null;
+        var bestAway = float.MaxValue;
+        foreach (var other in processor.Roads.ToList())
+        {
+            var frames = other.Frames;
+            if (other == except || other.Entity == null || other.Closed || frames.Count < 2)
+                continue;
+            var toRoad = Matrix.Invert(other.Entity.Transform.WorldMatrix);
+            var local = Vector3.TransformCoordinate(world, toRoad);
+            var nearest = frames.MinBy(f => (f.Position.X - local.X) * (f.Position.X - local.X) + (f.Position.Z - local.Z) * (f.Position.Z - local.Z));
+            var off = new System.Numerics.Vector3(local.X, nearest.Position.Y, local.Z) - nearest.Position;
+            var across = System.Numerics.Vector3.Dot(off, nearest.Right);
+            var alongIt = System.Numerics.Vector3.Dot(off, nearest.Forward);
+            if (MathF.Abs(across) > other.Section.Width / 2f || MathF.Abs(alongIt) > RoadComponent.Spacing
+                || nearest.Distance - frames[0].Distance < SplitFromEnd || frames[^1].Distance - nearest.Distance < SplitFromEnd || MathF.Abs(across) >= bestAway)
+                continue;
+            // Which of its points come after it: those nearest a frame further along.
+            var points = RoadProcessor.Points(other);
+            var index = points.Count(p => frames.MinBy(f => System.Numerics.Vector3.DistanceSquared(f.Position,
+                new System.Numerics.Vector3(p.Transform.Position.X, p.Transform.Position.Y, p.Transform.Position.Z))).Distance < nearest.Distance);
+            if (index < 1 || index >= points.Count + 1)
+                continue;
+            var centre = new Vector3(nearest.Position.X, nearest.Position.Y, nearest.Position.Z);
+            var inWorld = Vector3.TransformCoordinate(centre, other.Entity.Transform.WorldMatrix);
+            var parent = other.Entity.GetParent();
+            var inParent = parent != null ? Vector3.TransformCoordinate(inWorld, Matrix.Invert(parent.Transform.WorldMatrix)) : inWorld;
+            bestAway = MathF.Abs(across);
+            best = new Join(other.Entity.Id, null, false, inWorld, SplitIndex: index, SplitLocal: centre, SplitInParent: inParent,
+                SplitAlong: nearest.Distance - frames[0].Distance);
         }
         return best;
     }
+
+    /// <summary>
+    /// Splits a road in two where a <see cref="Join"/> says (asset side, as part of the transaction it is called in), with a
+    /// new junction between them: the road ends there, and a new one like it starts there with its later points and
+    /// whatever its end was joined to. The join, then, to that junction. Unchanged if it splits nothing.
+    /// </summary>
+    private Join Split(EntityViewModel anyInAsset, Join join)
+    {
+        if (join.SplitIndex is not { } index || !anyInAsset.Asset.Asset.Hierarchy.Parts.TryGetValue(join.Road, out var design)
+            || design.Entity.Get<RoadComponent>() is not { } road)
+            return join;
+        var entity = design.Entity;
+        var parent = entity.GetParent();
+        var points = entity.Transform.Children.Select(t => t.Entity).ToList();
+        index = Math.Clamp(index, 1, points.Count);
+        var graph = anyInAsset.Asset.AssetHierarchyPropertyGraph;
+        var siblings = parent != null ? parent.Transform.Children.IndexOf(entity.Transform) + 1 : anyInAsset.Asset.Asset.Hierarchy.RootParts.Count;
+
+        var junction = new Entity("Junction") { new RoadJunctionComponent() };
+        junction.Transform.Position = join.SplitInParent;
+        // The rest of it: like it, from the junction on to wherever it ended.
+        var rest = new RoadComponent();
+        // Its own settings only: not the component's id (EntityComponent's), which must stay its own.
+        foreach (var property in typeof(RoadComponent).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly).Where(p => p.CanWrite && p.GetCustomAttributes(typeof(DataMemberAttribute), false).Length > 0
+            && !p.Name.StartsWith("From", StringComparison.Ordinal)))
+            property.SetValue(rest, property.GetValue(road));
+        rest.FromJunction = junction.Get<RoadJunctionComponent>();
+        var restEntity = new Entity(entity.Name + " (2)") { rest };
+        restEntity.Transform.Position = entity.Transform.Position;
+        restEntity.Transform.Rotation = entity.Transform.Rotation;
+        restEntity.Transform.Scale = entity.Transform.Scale;
+        var restPoints = new List<Entity> { new Entity("Point 1") { Transform = { Position = join.SplitLocal } } };
+        foreach (var point in points.Skip(index))
+        {
+            var copy = new Entity(point.Name) { Transform = { Position = point.Transform.Position, Rotation = point.Transform.Rotation, Scale = point.Transform.Scale } };
+            if (point.Get<RoadPointComponent>() is { } settings)
+                copy.Add(new RoadPointComponent { FollowRotation = settings.FollowRotation, Handle = settings.Handle });
+            // Its viaducts too (they go with the point, so keep their ids).
+            foreach (var viaduct in point.GetAll<RoadViaductComponent>())
+                copy.Add(AssetCloner.Clone(viaduct)!);
+            restPoints.Add(copy);
+        }
+        var meeting = new Entity($"Point {index + 1}") { Transform = { Position = join.SplitLocal } };
+
+        // What is built into it past the split goes with the rest of it: ramps starting past it (counted from the
+        // junction now), a fork at its end; those keep their ids, so roads joined to them still are. A viaduct carrying
+        // all of it carries both.
+        var moved = new List<EntityComponent>();
+        foreach (var ramp in entity.GetAll<RoadRampComponent>().Where(r => r.Start >= join.SplitAlong))
+        {
+            var copy = AssetCloner.Clone(ramp)!;
+            copy.Start -= join.SplitAlong;
+            restEntity.Add(copy);
+            moved.Add(ramp);
+        }
+        if (entity.Get<RoadForkComponent>() is { AtEnd: true } endFork)
+        {
+            restEntity.Add(AssetCloner.Clone(endFork)!);
+            moved.Add(endFork);
+        }
+        foreach (var viaduct in entity.GetAll<RoadViaductComponent>())
+        {
+            var copy = AssetCloner.Clone(viaduct)!;
+            copy.Id = Guid.NewGuid();
+            restEntity.Add(copy);
+        }
+
+        foreach (var made in new[] { junction, restEntity, meeting }.Concat(restPoints))
+            AssetCollectionItemIdHelper.GenerateMissingItemIds(made);
+        void Add(Entity part, Entity? under, int at)
+        {
+            var parts = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(part, "") };
+            graph.AddPartToAsset(parts, parts.Single().Value, under, at);
+        }
+        Add(junction, parent, siblings);
+        Add(restEntity, parent, siblings + 1);
+        for (var i = 0; i < restPoints.Count; i++)
+            Add(restPoints[i], restEntity, i);
+
+        // This one ends at the junction now: its later points gone, one there instead, and its end joined to it.
+        var gone = points.Skip(index).Select(p => anyInAsset.Asset.Asset.Hierarchy.Parts[p.Id]).ToList();
+        if (gone.Count > 0)
+        {
+            graph.DeleteParts(gone, out var mapping);
+            editor.UndoRedoService.PushOperation(new DeletedPartsTrackingOperation<EntityDesign, Entity>(anyInAsset.Asset, mapping));
+        }
+        Add(meeting, entity, index);
+        if (moved.Count > 0)
+        {
+            var components = editor.Session.AssetNodeContainer.GetOrCreateNode(entity)[nameof(Entity.Components)].Target!;
+            foreach (var component in moved)
+                components.Remove(component, new NodeIndex(entity.Components.IndexOf(component)));
+        }
+        if (NodeOf(anyInAsset, road) is { } node)
+        {
+            Link(node, road, nameof(RoadComponent.ToJunction), junction.Get<RoadJunctionComponent>());
+            node[nameof(RoadComponent.ToRamp)].Update(null);
+            node[nameof(RoadComponent.ToRoad)].Update(null);
+            node[nameof(RoadComponent.ToFork)].Update(null);
+        }
+        return new Join(junction.Id, null, false, join.Position, Junction: true);
+    }
+
+    /// <summary>Joins changed in the asset that the game side is still to be told of, by ids: the road's entity, which of its joins, and the component it names.</summary>
+    private readonly List<(Guid Road, string Join, Guid Target)> unlinked = new();
+
+    /// <summary>
+    /// Changes a road's join (asset side) to name a component, through its node; and has the game side's follow
+    /// (<see cref="LinkGameSide"/>), as the editor's own sync names it by its entity there, which may not be there yet.
+    /// </summary>
+    private void Link(Stride.Core.Quantum.IObjectNode node, RoadComponent road, string join, EntityComponent? target)
+    {
+        node[join].Update(target);
+        // A junction's id after it, so the game has it even if the component comes as none.
+        if (join is nameof(RoadComponent.FromJunction) or nameof(RoadComponent.ToJunction))
+            node[join + "Id"].Update(target?.Id ?? Guid.Empty);
+        if (target != null && road.Entity != null)
+            unlinked.Add((road.Entity.Id, join, target.Id));
+    }
+
+    /// <summary>
+    /// Points the game side's roads at what their joins changed to just now name, once it is all there: a new junction
+    /// reaches the game side after the change naming it, which then finds nothing and names nothing.
+    /// </summary>
+    private async void LinkGameSide(AssetId assetId)
+    {
+        var links = unlinked.ToList();
+        unlinked.Clear();
+        // For a while, not just once: the editor's own change can come after, naming nothing again.
+        for (var attempt = 0; attempt < 60 && links.Count > 0; attempt++)
+        {
+            await controller.InvokeAsync(() =>
+            {
+                if (game?.SceneSystem.SceneInstance?.RootScene is not { } scene)
+                    return;
+                var components = Components(scene).ToList();
+                foreach (var link in links)
+                {
+                    if (FindEntity(new AbsoluteId(assetId, link.Road))?.Get<RoadComponent>() is not { } road
+                        || components.FirstOrDefault(c => c.Id == link.Target) is not { } target)
+                        continue;
+                    var property = typeof(RoadComponent).GetProperty(link.Join)!;
+                    if (property.GetValue(road) != target)
+                        property.SetValue(road, target);
+                }
+            });
+            await Task.Delay(50);
+        }
+    }
+
+    /// <summary>All the components in a scene and its children's, for finding one by its id.</summary>
+    private static IEnumerable<EntityComponent> Components(Scene scene) =>
+        scene.Entities.SelectMany(e => e.GetChildren().Prepend(e).SelectMany(Descendants)).SelectMany(e => e.Components)
+            .Concat(scene.Children.SelectMany(Components));
+
+    private static IEnumerable<Entity> Descendants(Entity entity) => entity.GetChildren().SelectMany(Descendants).Prepend(entity);
+
+    /// <summary>
+    /// The node to change a road's settings through (asset side), so the change is recorded to undo and reaches the
+    /// game: made if the editor has none for it yet. None for a road not in the asset yet, whose settings are set directly.
+    /// </summary>
+    private Stride.Core.Quantum.IObjectNode? NodeOf(EntityViewModel anyInAsset, RoadComponent road) =>
+        road.Entity != null && anyInAsset.Asset.Asset.Hierarchy.Parts.ContainsKey(road.Entity.Id)
+            ? editor.Session.AssetNodeContainer.GetOrCreateNode(road)
+            : null;
 
     /// <summary>
     /// Joins one end of a road (asset side) to what a <see cref="Join"/> names, in the same asset: as part of the
@@ -367,16 +635,31 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     /// </summary>
     private void Joined(EntityViewModel anyInAsset, RoadComponent road, Join join, bool atStart)
     {
-        if (!anyInAsset.Asset.Asset.Hierarchy.Parts.TryGetValue(join.Road, out var design) || design.Entity.Get<RoadComponent>() is not { } other)
+        if (!anyInAsset.Asset.Asset.Hierarchy.Parts.TryGetValue(join.Road, out var design))
+            return;
+        if (join.Junction && design.Entity.Get<RoadJunctionComponent>() is { } junction)
+        {
+            var name = atStart ? nameof(RoadComponent.FromJunction) : nameof(RoadComponent.ToJunction);
+            if (NodeOf(anyInAsset, road) is { } junctionNode)
+                Link(junctionNode, road, name, junction);
+            else if (atStart)
+                road.FromJunction = junction;
+            else
+                road.ToJunction = junction;
+            return;
+        }
+        if (design.Entity.Get<RoadComponent>() is not { } other)
             return;
         if (join.ForkLeft is { } forkLeft && design.Entity.Get<RoadForkComponent>() is { } fork)
         {
-            JoinedToFork(road, other, fork, forkLeft, atStart);
+            JoinedToFork(anyInAsset, road, other, fork, forkLeft, atStart);
             return;
         }
         var ramp = join.RampIndex is { } i ? design.Entity.GetAll<RoadRampComponent>().ElementAtOrDefault(i) : null;
+        if (ramp == null)
+            Matched(anyInAsset, road, other, reversed: atStart != join.Last);
         // A road not yet in the asset is set directly; one in it, through its node, so the change can be undone.
-        if (editor.Session.AssetNodeContainer.GetNode(road) is not { } node)
+        if (NodeOf(anyInAsset, road) is not { } node)
         {
             if (atStart)
                 (road.FromRamp, road.FromRoad, road.FromRoadsEnd) = (ramp, ramp == null ? other : null, join.Last);
@@ -386,23 +669,51 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         }
         if (atStart)
         {
-            node[nameof(RoadComponent.FromRamp)].Update(ramp);
-            node[nameof(RoadComponent.FromRoad)].Update(ramp == null ? other : null);
+            Link(node, road, nameof(RoadComponent.FromRamp), ramp);
+            Link(node, road, nameof(RoadComponent.FromRoad), ramp == null ? other : null);
             node[nameof(RoadComponent.FromRoadsEnd)].Update(join.Last);
         }
         else
         {
-            node[nameof(RoadComponent.ToRamp)].Update(ramp);
-            node[nameof(RoadComponent.ToRoad)].Update(ramp == null ? other : null);
+            Link(node, road, nameof(RoadComponent.ToRamp), ramp);
+            Link(node, road, nameof(RoadComponent.ToRoad), ramp == null ? other : null);
             node[nameof(RoadComponent.ToRoadsEnd)].Update(join.Last);
         }
+    }
+
+    /// <summary>
+    /// Makes a road (asset side) like another across, so where one's end joins the other's they meet edge to edge: its
+    /// lanes, their width, its shoulders, median and sidewalks. Turned about if it runs the other way from there (its
+    /// start on the other's start, or its end on the other's end): its lanes each way, and its sidewalks, swap sides.
+    /// </summary>
+    private void Matched(EntityViewModel anyInAsset, RoadComponent road, RoadComponent other, bool reversed)
+    {
+        var values = new (string Name, object Value)[]
+        {
+            (nameof(RoadComponent.ForwardLanes), reversed ? other.BackwardLanes : other.ForwardLanes),
+            (nameof(RoadComponent.BackwardLanes), reversed ? other.ForwardLanes : other.BackwardLanes),
+            (nameof(RoadComponent.LaneWidth), other.LaneWidth),
+            (nameof(RoadComponent.ShoulderWidth), other.ShoulderWidth),
+            (nameof(RoadComponent.MedianWidth), other.MedianWidth),
+            (nameof(RoadComponent.Median), other.Median),
+            (nameof(RoadComponent.SidewalkLeft), reversed ? other.SidewalkRight : other.SidewalkLeft),
+            (nameof(RoadComponent.SidewalkRight), reversed ? other.SidewalkLeft : other.SidewalkRight),
+        };
+        if (NodeOf(anyInAsset, road) is { } node)
+        {
+            foreach (var (name, value) in values)
+                node[name].Update(value);
+            return;
+        }
+        foreach (var (name, value) in values)
+            typeof(RoadComponent).GetProperty(name)!.SetValue(road, value);
     }
 
     /// <summary>
     /// Joins one end of a road (asset side) to one group of a fork as its branch: it takes that group's lanes, one way,
     /// going the way their traffic does, and the trunk's lane width.
     /// </summary>
-    private void JoinedToFork(RoadComponent road, RoadComponent trunk, RoadForkComponent fork, bool left, bool atStart)
+    private void JoinedToFork(EntityViewModel anyInAsset, RoadComponent road, RoadComponent trunk, RoadForkComponent fork, bool left, bool atStart)
     {
         var shape = new RoadForkShape(trunk.Section, fork.Spec, 0f, float.MaxValue / 4f);
         if (!shape.Valid)
@@ -419,10 +730,15 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
             (nameof(RoadComponent.LaneWidth), trunk.LaneWidth),
             (nameof(RoadComponent.MedianWidth), 0f),
         };
-        if (editor.Session.AssetNodeContainer.GetNode(road) is { } node)
+        if (NodeOf(anyInAsset, road) is { } node)
         {
             foreach (var (name, value) in values)
-                node[name].Update(value);
+            {
+                if (value is EntityComponent component)
+                    Link(node, road, name, component);
+                else
+                    node[name].Update(value);
+            }
             return;
         }
         foreach (var (name, value) in values)
@@ -453,13 +769,28 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         AssetCollectionItemIdHelper.GenerateMissingItemIds(point);
         var collection = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(point, "") };
         index = Math.Clamp(index, 0, road.AssetSideEntity.Transform.Children.Count);
+        Join? ended = null;
 
         using (var transaction = editor.UndoRedoService.CreateTransaction())
         {
             road.Asset.AssetHierarchyPropertyGraph.AddPartToAsset(collection, collection.Single().Value, road.AssetSideEntity, index);
             if (into is { } join && road.AssetSideEntity.Get<RoadComponent>() is { } component)
-                Joined(road, component, join, false);
+            {
+                ended = Split(road, join);
+                Joined(road, component, ended.Value, false);
+            }
             editor.UndoRedoService.SetName(transaction, $"Add road point '{point.Name}'");
+        }
+        LinkGameSide(roadId.AssetId);
+
+        // Ended at a junction: its network selected, so the next click carries on from the junction across it.
+        if (ended is { Junction: true } atJunction && road.Asset.Asset.Hierarchy.Parts.TryGetValue(atJunction.Road, out var junctionDesign)
+            && junctionDesign.Entity.GetParent() is { } network && editor.FindPartViewModel(new AbsoluteId(roadId.AssetId, network.Id)) is { } networkViewModel)
+        {
+            editor.ClearSelection();
+            editor.SelectedContent.Add(networkViewModel);
+            continueFrom = (atJunction, new AbsoluteId(roadId.AssetId, network.Id));
+            return;
         }
 
         // Select it, so the next click carries on after it.
@@ -474,7 +805,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
     /// Starts a new road in the network, at this place in its space and this place among its children, with its first
     /// point there; selects that point, so the next click carries the road on. One step to undo.
     /// </summary>
-    private void AddRoad(AbsoluteId networkId, Vector3 local, int index, Join? from = null)
+    private void AddRoad(AbsoluteId networkId, Vector3 local, int index, Join? from = null, Vector3? next = null)
     {
         if (editor.FindPartViewModel(networkId) is not EntityViewModel network)
             return;
@@ -488,16 +819,24 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         var points = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(point, "") };
         index = Math.Clamp(index, 0, network.AssetSideEntity.Transform.Children.Count);
 
-        if (from is { } join)
-            Joined(network, road.Get<RoadComponent>()!, join, true);
-
         using (var transaction = editor.UndoRedoService.CreateTransaction())
         {
+            if (from is { } join)
+                Joined(network, road.Get<RoadComponent>()!, Split(network, join), true);
             var graph = network.Asset.AssetHierarchyPropertyGraph;
             graph.AddPartToAsset(roads, roads.Single().Value, network.AssetSideEntity, index);
             graph.AddPartToAsset(points, points.Single().Value, road, 0);
+            // A second point too, where it is drawn on to at once.
+            if (next is { } onTo)
+            {
+                point = new Entity("Point 2") { Transform = { Position = onTo } };
+                AssetCollectionItemIdHelper.GenerateMissingItemIds(point);
+                var second = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(point, "") };
+                graph.AddPartToAsset(second, second.Single().Value, road, 1);
+            }
             editor.UndoRedoService.SetName(transaction, $"Add road '{road.Name}'");
         }
+        LinkGameSide(networkId.AssetId);
 
         if (editor.FindPartViewModel(new AbsoluteId(networkId.AssetId, point.Id)) is { } added)
         {
@@ -572,6 +911,102 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         {
             editor.ClearSelection();
             editor.SelectedContent.Add(selected);
+        }
+    }
+
+    /// <summary>
+    /// After a road is deleted: each junction left with fewer than three roads goes. One road left is a dead end there;
+    /// two are made one road where one runs on into the other (the second's points after the junction added to the
+    /// first, and its far end's join), else joined end to end. One step to undo.
+    /// </summary>
+    private void TidyJunctions()
+    {
+        tidyQueued = false;
+        var asset = editor.Asset;
+        var parts = asset.Asset.Hierarchy.Parts;
+        var roads = parts.Values.Select(p => p.Entity).Where(e => e.Get<RoadComponent>() != null).ToList();
+        var junctions = parts.Values.Select(p => p.Entity).Where(e => e.Get<RoadJunctionComponent>() != null).ToList();
+        var lonely = junctions.Select(j => (Junction: j, Id: j.Get<RoadJunctionComponent>()!.Id))
+            .Select(j => (j.Junction, Arms: roads.SelectMany(r => new[] { (Road: r, Start: true), (Road: r, Start: false) })
+                .Where(a => (a.Start ? a.Road.Get<RoadComponent>()!.FromJunctionId : a.Road.Get<RoadComponent>()!.ToJunctionId) == j.Id).ToList()))
+            .Where(j => j.Arms.Count < 3).ToList();
+        if (lonely.Count == 0)
+            return;
+
+        var graph = asset.AssetHierarchyPropertyGraph;
+        var gone = new List<EntityDesign>();
+        using (var transaction = editor.UndoRedoService.CreateTransaction())
+        {
+            foreach (var (junction, arms) in lonely)
+            {
+                foreach (var (road, start) in arms)
+                    Unjoin(road.Get<RoadComponent>()!, start);
+                if (arms.Count == 2)
+                {
+                    var (a, b) = (arms[0], arms[1]);
+                    // One running on into the other: B after A (A ending here, B starting here).
+                    if (a.Start && !b.Start)
+                        (a, b) = (b, a);
+                    var (first, second) = (a.Road.Get<RoadComponent>()!, b.Road.Get<RoadComponent>()!);
+                    if (!a.Start && b.Start && a.Road != b.Road)
+                    {
+                        Merge(a.Road, b.Road);
+                        gone.Add(parts[b.Road.Id]);
+                    }
+                    else
+                    {
+                        // Else held end to end: the first's end to the second's.
+                        var node = editor.Session.AssetNodeContainer.GetOrCreateNode(first);
+                        var name = a.Start ? nameof(RoadComponent.FromRoad) : nameof(RoadComponent.ToRoad);
+                        Link(node, first, name, second);
+                        node[a.Start ? nameof(RoadComponent.FromRoadsEnd) : nameof(RoadComponent.ToRoadsEnd)].Update(!b.Start);
+                    }
+                }
+                gone.Add(parts[junction.Id]);
+            }
+            if (gone.Count > 0)
+            {
+                graph.DeleteParts(gone.Distinct().ToList(), out var mapping);
+                editor.UndoRedoService.PushOperation(new DeletedPartsTrackingOperation<EntityDesign, Entity>(asset, mapping));
+            }
+            editor.UndoRedoService.SetName(transaction, "Tidy road junctions");
+        }
+        LinkGameSide(asset.Id);
+
+        void Unjoin(RoadComponent road, bool start)
+        {
+            var node = editor.Session.AssetNodeContainer.GetOrCreateNode(road);
+            var name = start ? nameof(RoadComponent.FromJunction) : nameof(RoadComponent.ToJunction);
+            node[name].Update(null);
+            node[name + "Id"].Update(Guid.Empty);
+        }
+
+        // B's points after its first (at the junction, as A's last is) added on to A, and B's far end's joins A's.
+        void Merge(Entity a, Entity b)
+        {
+            var points = b.Transform.Children.Select(t => t.Entity).Skip(1).ToList();
+            var at = a.Transform.Children.Count;
+            Matrix Local(TransformComponent t) => Matrix.Scaling(t.Scale) * Matrix.RotationQuaternion(t.Rotation) * Matrix.Translation(t.Position);
+            var toA = Matrix.Invert(Local(a.Transform));
+            var fromB = Local(b.Transform);
+            foreach (var point in points)
+            {
+                var copy = new Entity(point.Name) { Transform = { Position = Vector3.TransformCoordinate(Vector3.TransformCoordinate(point.Transform.Position, fromB), toA), Rotation = point.Transform.Rotation } };
+                if (point.Get<RoadPointComponent>() is { } settings)
+                    copy.Add(new RoadPointComponent { FollowRotation = settings.FollowRotation, Handle = settings.Handle });
+                AssetCollectionItemIdHelper.GenerateMissingItemIds(copy);
+                var collection = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(copy, "") };
+                graph.AddPartToAsset(collection, collection.Single().Value, a, at++);
+            }
+            var (ra, rb) = (a.Get<RoadComponent>()!, b.Get<RoadComponent>()!);
+            var node = editor.Session.AssetNodeContainer.GetOrCreateNode(ra);
+            Link(node, ra, nameof(RoadComponent.ToRamp), rb.ToRamp);
+            Link(node, ra, nameof(RoadComponent.ToRoad), rb.ToRoad);
+            Link(node, ra, nameof(RoadComponent.ToFork), rb.ToFork);
+            Link(node, ra, nameof(RoadComponent.ToJunction), rb.ToJunction);
+            node[nameof(RoadComponent.ToJunctionId)].Update(rb.ToJunctionId);
+            node[nameof(RoadComponent.ToRoadsEnd)].Update(rb.ToRoadsEnd);
+            node[nameof(RoadComponent.ToForksLeft)].Update(rb.ToForksLeft);
         }
     }
 
