@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using Stride.Core.Mathematics;
 using Stride.Engine;
+using Stride.Engine.Plugins;
 using Stride.Engine.Design;
 using Stride.Games;
 using Stride.Graphics;
@@ -49,6 +50,7 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
             data.Holder.Scene = null;
         Release(data.Model);
         component.Frames = Array.Empty<RoadFrame>();
+        Unfit(component);
     }
 
     public override void Update(GameTime time)
@@ -69,6 +71,8 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
                 below.Add(setback);
         }
         var belowState = below.ToHashCode();
+        // The ground's shape (not its fits), for the roads that follow it.
+        var groundState = PluginApi.TryGet<Func<EntityManager, int>>("Terrain.Version", out var groundVersion) ? groundVersion(EntityManager) : 0;
         foreach (var (component, data) in ComponentDatas)
         {
             // Where the road is, every frame: what it builds isn't its child, so doesn't move with it.
@@ -82,6 +86,8 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
             // One with viaducts builds again when what is below them changes.
             if (component.Entity.Get<RoadViaductComponent>() != null || component.Entity.Transform.Children.Any(t => t.Entity.Get<RoadViaductComponent>() != null))
                 state = HashCode.Combine(state, belowState);
+            if (component.FollowGround)
+                state = HashCode.Combine(state, groundState);
             if (state == data.State)
                 continue;
             data.State = state;
@@ -146,6 +152,11 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         var hash = new HashCode();
         hash.Add(road.Section);
         hash.Add(road.Closed);
+        hash.Add(road.FollowGround);
+        hash.Add(road.GroundClearance);
+        hash.Add(road.FitGround);
+        hash.Add(road.FitFalloff);
+        hash.Add(road.GroundLayer);
         hash.Add(road.SidewalkFalloff);
         hash.Add(road.Collision);
         hash.Add(road.SurfaceMaterial);
@@ -209,6 +220,7 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
             if (point.Get<RoadPointComponent>() is { } settings)
             {
                 hash.Add(settings.FollowRotation);
+                hash.Add(settings.KeepHeight);
                 hash.Add(settings.Handle);
             }
             foreach (var viaduct in point.GetAll<RoadViaductComponent>())
@@ -247,12 +259,14 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         if (points.Count < 2 || road.Section.Lanes == 0 || device == null || root == null)
         {
             road.Frames = Array.Empty<RoadFrame>();
+            Unfit(road);
             if (data.Holder != null)
                 data.Holder.EnableAll(false, true);
             return;
         }
 
         var curvePoints = points.Select(ToCurvePoint).ToList();
+        FollowGround(road, points, curvePoints);
         // Its ends held where they are joined, running on the way what they join does; their points shown there too.
         foreach (var atStart in new[] { true, false })
         {
@@ -276,6 +290,7 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         }
         road.Frames = curve.Frames(RoadComponent.Spacing, out var pointsAt);
         var structures = Structures(road, points, pointsAt);
+        FitGround(road, structures);
         var ramps = road.Entity.GetAll<RoadRampComponent>().Select(r => r.Spec).ToList();
         var fork = road.Entity.Get<RoadForkComponent>()?.Spec;
         // Cut back where it meets a junction, which paves the rest.
@@ -380,8 +395,104 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
     }
 
     /// <summary>
+    /// Puts a road's points on the ground, where it follows it (see <see cref="RoadComponent.FollowGround"/>): the ground
+    /// as it was before any fits (through the plugin API: none without the terrain plugin, or a terrain under them), so
+    /// a road never sinks into its own fit. Points carrying a viaduct, or keeping their height, and where there is no
+    /// ground, keep theirs. Shown there too (on the game's side only: what is saved keeps the height they were given).
+    /// </summary>
+    private void FollowGround(RoadComponent road, List<Entity> points, List<CurvePoint> curvePoints)
+    {
+        if (!road.FollowGround || !PluginApi.TryGet<Func<EntityManager, Vector3, float>>("Terrain.BaseHeightAt", out var baseHeightAt))
+            return;
+        var world = road.Entity.Transform.WorldMatrix;
+        var toRoad = Matrix.Invert(world);
+        for (var i = 0; i < points.Count; i++)
+        {
+            var point = points[i];
+            if (point.Get<RoadPointComponent>() is { KeepHeight: true } || point.Get<RoadViaductComponent>() != null)
+                continue;
+            var at = Vector3.TransformCoordinate(point.Transform.Position, world);
+            var height = baseHeightAt(EntityManager, at);
+            if (float.IsNaN(height))
+                continue;
+            var local = Vector3.TransformCoordinate(new Vector3(at.X, height + road.GroundClearance, at.Z), toRoad);
+            curvePoints[i] = curvePoints[i] with { Position = ToNumerics(local) };
+            point.Transform.Position = local;
+        }
+    }
+
+    /// <summary>The key a road's fit of the ground is kept by (see <c>Terrain.Fit</c>).</summary>
+    private static string FitKey(RoadComponent road) => $"Road {road.Id}";
+
+    /// <summary>
+    /// Fits the ground to a road (see <see cref="RoadComponent.FitGround"/>), in the editor: flat under it, down its banks
+    /// and easing back past them (<see cref="RoadGround.Targets"/>), on its stretches on the ground (not under its
+    /// viaducts), painted under it and its banks where it paints; its last fit put back first, so it follows the road as
+    /// it moves. Through the plugin API: nothing without the terrain plugin, or a terrain under it.
+    /// </summary>
+    private void FitGround(RoadComponent road, IReadOnlyList<StructureSpec> structures)
+    {
+        if ((EntityManager.ExecutionMode & ExecutionMode.Editor) == 0)
+            return;
+        if (!road.FitGround || road.Frames.Count < 2)
+        {
+            Unfit(road);
+            return;
+        }
+        if (!PluginApi.TryGet<Func<EntityManager, Vector3, Vector4?>>("Terrain.Grid", out var gridOf)
+            || !PluginApi.TryGet<Func<EntityManager, string, Vector3, int[], int[], float[], float[], int, bool[], bool>>("Terrain.Fit", out var fit))
+            return;
+        var world = road.Entity.Transform.WorldMatrix;
+        var middle = Vector3.TransformCoordinate(ToStride(road.Frames[road.Frames.Count / 2].Position), world);
+        if (gridOf(EntityManager, middle) is not { } grid)
+            return;
+        var origin = new Vector3(grid.X, grid.Y, grid.Z);
+        var spacing = grid.W;
+
+        // Its frames on the terrain's grid (from its origin), stretch by stretch on the ground.
+        RoadFrame OnGrid(RoadFrame f) => new(
+            ToNumerics(Vector3.TransformCoordinate(ToStride(f.Position), world) - origin),
+            ToNumerics(Vector3.Normalize(Vector3.TransformNormal(ToStride(f.Forward), world))),
+            ToNumerics(Vector3.Normalize(Vector3.TransformNormal(ToStride(f.Right), world))),
+            f.Distance);
+        var section = road.Section;
+        var targets = new Dictionary<(int X, int Z), GroundTarget>();
+        foreach (var run in RoadStructureBuilder.OnGround(road.Frames, structures))
+        {
+            if (run.Count < 2)
+                continue;
+            foreach (var (at, target) in RoadGround.Targets(run.Select(OnGrid).ToList(), section, spacing, falloff: road.FitFalloff))
+            {
+                if (!targets.TryGetValue(at, out var had) || target.Beats(had))
+                    targets[at] = target;
+            }
+        }
+
+        var count = targets.Count;
+        var (xs, zs, heights, weights, paint) = (new int[count], new int[count], new float[count], new float[count], new bool[count]);
+        var i = 0;
+        foreach (var ((x, z), target) in targets)
+        {
+            (xs[i], zs[i], heights[i], weights[i]) = (x, z, target.Height + origin.Y, target.Weight);
+            // Painted under it and its banks.
+            paint[i] = target.Beyond <= section.BankWidth;
+            i++;
+        }
+        fit(EntityManager, FitKey(road), middle, xs, zs, heights, weights, road.GroundLayer, paint);
+    }
+
+    /// <summary>Puts back the ground a road was fitted to (through the plugin API), as it goes or stops fitting it.</summary>
+    private void Unfit(RoadComponent road)
+    {
+        if ((EntityManager.ExecutionMode & ExecutionMode.Editor) != 0
+            && PluginApi.TryGet<Func<EntityManager, string, bool>>("Terrain.Unfit", out var unfit))
+            unfit(EntityManager, FitKey(road));
+    }
+
+    /// <summary>
     /// How high the ground is under a point of a road's frames (in its space), for how far its viaducts' pillars reach
-    /// down: the world's ground plane (y = 0) for now, as Stride has no terrain of its own to ask.
+    /// down: the terrain's (through the plugin API, with the terrain plugin and a terrain there), else the world's ground
+    /// plane (y = 0).
     /// </summary>
     private float? GroundUnder(Matrix roadWorld, NVector3 local)
     {
@@ -389,7 +500,8 @@ public sealed class RoadProcessor : EntityProcessor<RoadComponent, RoadProcessor
         // None on a road or junction below: a pillar there would stand in the traffic.
         if (RoadBelow(world))
             return null;
-        world.Y = 0f;
+        var ground = PluginApi.TryGet<Func<EntityManager, Vector3, float>>("Terrain.HeightAt", out var heightAt) ? heightAt(EntityManager, world) : float.NaN;
+        world.Y = float.IsNaN(ground) ? 0f : ground;
         return Vector3.TransformCoordinate(world, Matrix.Invert(roadWorld)).Y;
     }
 

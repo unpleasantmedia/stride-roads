@@ -20,6 +20,10 @@ public sealed class RoadPointComponent : EntityComponent
     [DataMember(0), DefaultValue(false)]
     public bool FollowRotation { get; set; }
 
+    /// <summary>Whether it keeps its own height where its road follows the ground (as a point on a bridge's approach).</summary>
+    [DataMember(5), DefaultValue(false)]
+    public bool KeepHeight { get; set; }
+
     /// <summary>How far the road holds its way either side of the point, as a share of the distance to each neighbour: a third makes an even curve.</summary>
     [DataMember(10), DataMemberRange(0.05, 1, 0.01, 0.1, 2), DefaultValue(1f / 3f)]
     public float Handle { get; set; } = 1f / 3f;

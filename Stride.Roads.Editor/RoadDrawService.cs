@@ -499,7 +499,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
         {
             var copy = new Entity(point.Name) { Transform = { Position = point.Transform.Position, Rotation = point.Transform.Rotation, Scale = point.Transform.Scale } };
             if (point.Get<RoadPointComponent>() is { } settings)
-                copy.Add(new RoadPointComponent { FollowRotation = settings.FollowRotation, Handle = settings.Handle });
+                copy.Add(new RoadPointComponent { FollowRotation = settings.FollowRotation, KeepHeight = settings.KeepHeight, Handle = settings.Handle });
             // Its viaducts too (they go with the point, so keep their ids).
             foreach (var viaduct in point.GetAll<RoadViaductComponent>())
                 copy.Add(AssetCloner.Clone(viaduct)!);
@@ -993,7 +993,7 @@ public sealed class RoadDrawService : EditorGameMouseServiceBase, IEditorGameToo
             {
                 var copy = new Entity(point.Name) { Transform = { Position = Vector3.TransformCoordinate(Vector3.TransformCoordinate(point.Transform.Position, fromB), toA), Rotation = point.Transform.Rotation } };
                 if (point.Get<RoadPointComponent>() is { } settings)
-                    copy.Add(new RoadPointComponent { FollowRotation = settings.FollowRotation, Handle = settings.Handle });
+                    copy.Add(new RoadPointComponent { FollowRotation = settings.FollowRotation, KeepHeight = settings.KeepHeight, Handle = settings.Handle });
                 AssetCollectionItemIdHelper.GenerateMissingItemIds(copy);
                 var collection = new AssetPartCollection<EntityDesign, Entity> { new EntityDesign(copy, "") };
                 graph.AddPartToAsset(collection, collection.Single().Value, a, at++);

@@ -5,6 +5,7 @@ using Stride.Assets.Presentation.AssetEditors.GameEditor.Game;
 using Stride.Core;
 using Stride.Core.Mathematics;
 using Stride.Engine;
+using Stride.Engine.Plugins;
 using Stride.Engine.Processors;
 using Stride.Graphics;
 using Stride.Graphics.Semantics;
@@ -13,8 +14,9 @@ using Stride.Rendering;
 namespace Stride.Roads.Editor;
 
 /// <summary>
-/// Where the mouse points at in the scene editor: on the model under it (as the editor's picking finds it), else on
-/// the ground plane (y = 0). The model's triangles are read back once per mesh and kept, as reading is slow.
+/// Where the mouse points at in the scene editor: on the model under it (as the editor's picking finds it) or the
+/// terrain (through the plugin API, with the terrain plugin), whichever is nearer, else on the ground plane (y = 0).
+/// The model's triangles are read back once per mesh and kept, as reading is slow.
 /// </summary>
 internal sealed class SurfacePicker
 {
@@ -41,10 +43,17 @@ internal sealed class SurfacePicker
     public Vector3 PointAt(Vector2 mouse)
     {
         var ray = RayAt(mouse);
-        if (ray is { } r && selection.Pick().Entity is { } entity && entity.Get<ModelComponent>() is { Model: { } model } component
-            && Hit(r, component, model) is { } hit)
-            return hit;
-        return game.GetPositionInScene(mouse);
+        if (ray is not { } r)
+            return game.GetPositionInScene(mouse);
+        Vector3? nearest = null;
+        if (selection.Pick().Entity is { } entity && entity.Get<ModelComponent>() is { Model: { } model } component)
+            nearest = Hit(r, component, model);
+        if (game.SceneSystem.SceneInstance is { } scene
+            && PluginApi.TryGet<Func<EntityManager, Vector3, Vector3, Vector3?>>("Terrain.Intersect", out var intersect)
+            && intersect(scene, r.Position, r.Direction) is { } ground
+            && (nearest is not { } model2 || Vector3.DistanceSquared(r.Position, ground) < Vector3.DistanceSquared(r.Position, model2)))
+            nearest = ground;
+        return nearest ?? game.GetPositionInScene(mouse);
     }
 
     /// <summary>The camera's ray through this place in the viewport, as the editor makes it.</summary>

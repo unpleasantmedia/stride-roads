@@ -72,6 +72,32 @@ public sealed class RoadComponent : EntityComponent
     [DataMember(90), Display(category: "Ground"), DataMemberRange(1, 89, 0.5, 5, 1), DefaultValue(RoadCrossSection.WalkableAngle)]
     public float ShoulderAngle { get; set; } = RoadCrossSection.WalkableAngle;
 
+    /// <summary>
+    /// Whether its points sit on the ground (a terrain's, with the terrain plugin, through the plugin API), however they
+    /// are moved: those carrying a viaduct, or marked to keep their height, keep theirs.
+    /// </summary>
+    [DataMember(92), Display("Follow ground", category: "Ground"), DefaultValue(true)]
+    public bool FollowGround { get; set; } = true;
+
+    /// <summary>
+    /// How far above the ground its points sit where it follows it, in metres: as far as fitting sinks the ground under
+    /// its surface, so on flat ground fitting leaves the ground under it as it is.
+    /// </summary>
+    [DataMember(93), Display("Ground clearance", category: "Ground"), DataMemberRange(-5, 5, 0.05, 0.5, 2), DefaultValue(RoadGround.Sink)]
+    public float GroundClearance { get; set; } = RoadGround.Sink;
+
+    /// <summary>Whether the ground (a terrain's) is fitted to it: flat under it, down its banks, easing back past them; again as it changes.</summary>
+    [DataMember(94), Display("Fit ground", category: "Ground"), DefaultValue(true)]
+    public bool FitGround { get; set; } = true;
+
+    /// <summary>How far, in metres, the fitted ground eases back to the ground around past its banks.</summary>
+    [DataMember(96), Display("Fit falloff", category: "Ground"), DataMemberRange(0, 100, 0.5, 5, 1), DefaultValue(12f)]
+    public float FitFalloff { get; set; } = 12f;
+
+    /// <summary>The terrain layer painted under it and its banks while fitting (none below 0).</summary>
+    [DataMember(98), Display("Paint layer", category: "Ground"), DataMemberRange(-1, 31, 1, 1, 0), DefaultValue(-1)]
+    public int GroundLayer { get; set; } = -1;
+
     /// <summary>Whether the road runs on from its last point back to its first, as a ring.</summary>
     [DataMember(100), Display(category: "Shape"), DefaultValue(false)]
     public bool Closed { get; set; }
